@@ -1,7 +1,7 @@
 variable "azure_region" {
   type        = string
   description = "The Azure region where all foundational networking resources will be deployed."
-  default     = "eastus"
+  default     = "centralus"
 }
 
 variable "resource_group_name" {
