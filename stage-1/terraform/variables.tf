@@ -47,6 +47,56 @@ variable "tags" {
     Environment = "OnPrem-Simulation"
     Project     = "Enterprise-Cloud-Migration-Lab"
     ManagedBy   = "Terraform"
-    Stage       = "1.1"
+    Stage       = "1.2"
   }
 }
+
+variable "bastion_subnet_prefix" {
+  type        = list(string)
+  description = "Address prefix CIDR block for AzureBastionSubnet."
+  default     = ["10.10.2.0/26"]
+}
+
+variable "bastion_public_ip_name" {
+  type        = string
+  description = "Name of the Public IP for Azure Bastion."
+  default     = "pip-bastion-onprem"
+}
+
+variable "bastion_host_name" {
+  type        = string
+  description = "Name of the Azure Bastion Host."
+  default     = "bas-onprem-lab"
+}
+
+variable "hv01_vm_name" {
+  type        = string
+  description = "Name of the Hyper-V host virtual machine resource in Azure."
+  default     = "vm-hv01"
+}
+
+variable "hv01_private_ip" {
+  type        = string
+  description = "Static private IP address for HV01 within snet-management."
+  default     = "10.10.1.10"
+}
+
+variable "vm_size" {
+  type        = string
+  description = "Azure VM size supporting nested virtualization."
+  default     = "Standard_D4s_v5"
+}
+
+variable "admin_username" {
+  type        = string
+  description = "Administrator username for the Windows Server VM."
+  default     = "labadmin"
+}
+
+variable "admin_password" {
+  type        = string
+  description = "Administrator password for the Windows Server VM (leave null to auto-generate)."
+  default     = null
+  sensitive   = true
+}
+
