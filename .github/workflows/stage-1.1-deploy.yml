@@ -15,7 +15,7 @@ on:
       action:
         description: 'Terraform Action to execute'
         required: true
-        default: 'apply'
+        default: 'destroy'
         type: choice
         options:
           - plan
