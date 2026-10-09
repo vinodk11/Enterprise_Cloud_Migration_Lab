@@ -84,7 +84,7 @@ variable "hv01_private_ip" {
 variable "vm_size" {
   type        = string
   description = "Azure VM size supporting nested virtualization."
-  default     = "Standard_D4s_v5"
+  default     = "Standard_D4s_v3"
 }
 
 variable "admin_username" {

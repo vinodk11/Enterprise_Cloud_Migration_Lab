@@ -5,7 +5,7 @@
 Stage 1.2 deploys the simulated physical virtualization compute infrastructure on top of the Stage 1.1 foundational network:
 1. **Azure Bastion (Option A)**: Secure, zero-public-IP remote management over TLS 443.
 2. **Hyper-V Host Virtual Machine (`HV01`)**:
-   - Azure VM Size: `Standard_D4s_v5` (4 vCPUs, 16 GiB RAM) in `centralus`.
+   - Azure VM Size: `Standard_D4s_v3` (4 vCPUs, 16 GiB RAM) in `centralus`.
    - Windows Server 2022 Datacenter Azure Edition.
    - Hardware-assisted nested virtualization enabled.
    - Attached to `snet-management` at static private IP `10.10.1.10`.
