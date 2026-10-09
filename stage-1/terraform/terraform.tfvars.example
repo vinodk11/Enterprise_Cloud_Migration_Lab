@@ -1,0 +1,18 @@
+# Example Terraform variables for Stage 1.1 Azure foundational networking
+# Copy this file to terraform.tfvars to override default values:
+# cp terraform.tfvars.example terraform.tfvars
+
+azure_region             = "eastus"
+resource_group_name      = "rg-onprem-lab"
+vnet_name                = "vnet-onprem-lab"
+vnet_address_space       = ["10.10.0.0/16"]
+management_subnet_name   = "snet-management"
+management_subnet_prefix = ["10.10.1.0/24"]
+nsg_name                 = "nsg-onprem-lab"
+
+tags = {
+  Environment = "OnPrem-Simulation"
+  Project     = "Enterprise-Cloud-Migration-Lab"
+  ManagedBy   = "Terraform"
+  Stage       = "1.1"
+}
