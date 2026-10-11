@@ -100,6 +100,28 @@ if (-not (Test-Path $baseImagePath)) {
 # ------------------------------------------------------------------------------
 # 2. Helper: Cloud-Init ISO Generation
 # ------------------------------------------------------------------------------
+if (-not ([System.Management.Automation.PSTypeName]'ISOFile').Type) {
+    $typeDefinition = @"
+using System;
+using System.IO;
+using System.Runtime.InteropServices.ComTypes;
+
+public class ISOFile {
+    public static void Create(string path, object stream, int blockSize, int totalBlocks) {
+        byte[] buf = new byte[blockSize];
+        using (FileStream fs = File.OpenWrite(path)) {
+            IStream istream = (IStream)stream;
+            while (totalBlocks-- > 0) {
+                istream.Read(buf, blockSize, IntPtr.Zero);
+                fs.Write(buf, 0, blockSize);
+            }
+        }
+    }
+}
+"@
+    Add-Type -TypeDefinition $typeDefinition
+}
+
 function New-CloudInitISO {
     param (
         [string]$ISOPath,
@@ -146,7 +168,9 @@ ethernets:
     dhcp4: false
     addresses:
       - $IPAddress/24
-    gateway4: $Gateway
+    routes:
+      - to: default
+        via: $Gateway
     nameservers:
       addresses:
         - 1.1.1.1
@@ -160,15 +184,9 @@ ethernets:
     $root = $fsi.Root
     Get-ChildItem -Path $tempDir | ForEach-Object { $root.AddTree($_.FullName, $false) }
     $resultImage = $fsi.CreateResultImage()
-    $stream = $resultImage.ImageStream
 
     if (Test-Path $ISOPath) { Remove-Item $ISOPath -Force }
-    $fileStream = [System.IO.File]::OpenWrite($ISOPath)
-    $buffer = New-Object byte[] 65536
-    while (($bytesRead = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
-        $fileStream.Write($buffer, 0, $bytesRead)
-    }
-    $fileStream.Close()
+    [ISOFile]::Create($ISOPath, $resultImage.ImageStream, $resultImage.BlockSize, $resultImage.TotalBlocks)
     Remove-Item $tempDir -Recurse -Force
 }
 
