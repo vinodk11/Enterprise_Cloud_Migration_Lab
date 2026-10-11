@@ -44,22 +44,55 @@ if ((Test-Path $baseImagePath) -and ((Get-Item $baseImagePath).Length -lt 100MB)
 }
 
 if (-not (Test-Path $baseImagePath)) {
-    Write-Host "`n>>> [1/3] Downloading Ubuntu 22.04 LTS Base Image (~670 MB)..." -ForegroundColor Cyan
-    $ProgressPreference = 'SilentlyContinue'
-    if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
-        & curl.exe -L -o "$baseTarPath" "$downloadUrl"
+    # Check for locally downloaded base image or archive first
+    $localCandidates = @(
+        "C:\Users\labadmin\Downloads\jammy-server-cloudimg-amd64-azure.vhd.tar.gz",
+        "$env:USERPROFILE\Downloads\jammy-server-cloudimg-amd64-azure.vhd.tar.gz",
+        "$vhdPath\ubuntu-22.04-azure.vhd.tar.gz",
+        "C:\Users\labadmin\Downloads\Ubuntu-22.04-Server-Base.vhdx",
+        "C:\Users\labadmin\Downloads\Ubuntu-Base.vhdx"
+    )
+    $foundLocalArchive = $localCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+    if ($foundLocalArchive -and ($foundLocalArchive -like "*.vhdx")) {
+        Write-Host "`n>>> [1/3] Using locally existing VHDX: $foundLocalArchive" -ForegroundColor Green
+        Copy-Item -Path $foundLocalArchive -Destination $baseImagePath -Force
     } else {
-        Invoke-WebRequest -Uri $downloadUrl -OutFile $baseTarPath -UseBasicParsing
+        if ($foundLocalArchive) {
+            Write-Host "`n>>> [1/3] Found locally downloaded archive: $foundLocalArchive" -ForegroundColor Green
+            $baseTarPath = $foundLocalArchive
+        } else {
+            Write-Host "`n>>> [1/3] Downloading Ubuntu 22.04 LTS Base Image (~670 MB)..." -ForegroundColor Cyan
+            $ProgressPreference = 'SilentlyContinue'
+            try {
+                if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+                    & curl.exe -L -o "$baseTarPath" "$downloadUrl"
+                } else {
+                    Invoke-WebRequest -Uri $downloadUrl -OutFile $baseTarPath -UseBasicParsing
+                }
+            } catch {
+                Write-Warning "Download failed: $_"
+                Write-Host "Please download the image locally in Edge on HV01:" -ForegroundColor Yellow
+                Write-Host "  URL: $downloadUrl" -ForegroundColor White
+                Write-Host "  Save to: C:\Users\labadmin\Downloads\jammy-server-cloudimg-amd64-azure.vhd.tar.gz" -ForegroundColor White
+                Throw "Base image download failed. Please download manually and re-run."
+            }
+        }
+
+        Write-Host ">>> Extracting VHD from archive..." -ForegroundColor Cyan
+        & tar.exe -xzf "$baseTarPath" -C "$vhdPath"
+
+        $extractedVhd = Get-ChildItem -Path $vhdPath -Filter "*.vhd" -File | Select-Object -First 1
+        if (-not $extractedVhd) {
+            Throw "Extraction completed, but no .vhd file was found in $vhdPath."
+        }
+
+        Write-Host ">>> Converting to Hyper-V Gen-2 VHDX..." -ForegroundColor Cyan
+        Convert-VHD -Path $extractedVhd.FullName -DestinationPath $baseImagePath -VHDType Dynamic
+
+        Remove-Item $extractedVhd.FullName -Force -ErrorAction SilentlyContinue
+        Write-Host ">>> [OK] Base image created at $baseImagePath" -ForegroundColor Green
     }
-
-    Write-Host ">>> Extracting VHD from archive..." -ForegroundColor Cyan
-    & tar.exe -xzf "$baseTarPath" -C "$vhdPath"
-
-    Write-Host ">>> Converting to Hyper-V Gen-2 VHDX..." -ForegroundColor Cyan
-    Convert-VHD -Path $rawVhdPath -DestinationPath $baseImagePath -VHDType Dynamic
-
-    Remove-Item $baseTarPath, $rawVhdPath -Force -ErrorAction SilentlyContinue
-    Write-Host ">>> [OK] Base image created at $baseImagePath" -ForegroundColor Green
 } else {
     Write-Host "`n>>> [1/3] Base image ready at $baseImagePath" -ForegroundColor Green
 }
