@@ -1,0 +1,97 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+# ==============================================================================
+# Enterprise Cloud Migration Lab — Multi-Machine Vagrantfile (Hyper-V Provider)
+# Stage 1: On-Premises Datacenter Simulation (DC01, APP01, DB01, FILE01)
+# ==============================================================================
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "generic/ubuntu2204"
+
+  # Disable default SMB synced folder to eliminate interactive credential prompts
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+
+  # Base provisioning: ensure labadmin user exists, has sudo access, and password auth is enabled
+  config.vm.provision "shell", inline: <<-SHELL
+    set -e
+    echo "[PROVISION] Setting up labadmin credentials..."
+    if ! id -u labadmin >/dev/null 2>&1; then
+      useradd -m -s /bin/bash labadmin
+    fi
+    echo 'labadmin:LabAdmin2026!#' | chpasswd
+    usermod -aG sudo labadmin
+    echo "labadmin ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/labadmin
+    chmod 0440 /etc/sudoers.d/labadmin
+    
+    # Enable SSH password authentication for orchestration scripts
+    sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+    sed -i 's/^#\?KbdInteractiveAuthentication .*/KbdInteractiveAuthentication yes/' /etc/ssh/sshd_config
+    systemctl reload ssh || systemctl restart ssh || systemctl restart sshd
+    echo "[PROVISION] labadmin configuration complete."
+  SHELL
+
+  # ----------------------------------------------------------------------------
+  # VM 1: DC01 — Samba Active Directory Domain Controller & Internal DNS
+  # ----------------------------------------------------------------------------
+  config.vm.define "dc01" do |dc|
+    dc.vm.hostname = "DC01.corp.streamflix.lab"
+    dc.vm.network "public_network", bridge: "vSwitch-Internal-NAT"
+    dc.vm.provider "hyperv" do |v|
+      v.vmname = "DC01"
+      v.cpus = 2
+      v.memory = 2048
+      v.mac = "00155D100010"
+      v.auto_start_action = "Nothing"
+      v.auto_stop_action = "ShutDown"
+    end
+  end
+
+  # ----------------------------------------------------------------------------
+  # VM 2: APP01 — StreamFlix Web Frontend & Express REST API Gateway
+  # ----------------------------------------------------------------------------
+  config.vm.define "app01" do |app|
+    app.vm.hostname = "APP01.corp.streamflix.lab"
+    app.vm.network "public_network", bridge: "vSwitch-Internal-NAT"
+    app.vm.provider "hyperv" do |v|
+      v.vmname = "APP01"
+      v.cpus = 2
+      v.memory = 2048
+      v.mac = "00155D100020"
+      v.auto_start_action = "Nothing"
+      v.auto_stop_action = "ShutDown"
+    end
+  end
+
+  # ----------------------------------------------------------------------------
+  # VM 3: DB01 — PostgreSQL Database Engine & Media Schema
+  # ----------------------------------------------------------------------------
+  config.vm.define "db01" do |db|
+    db.vm.hostname = "DB01.corp.streamflix.lab"
+    db.vm.network "public_network", bridge: "vSwitch-Internal-NAT"
+    db.vm.provider "hyperv" do |v|
+      v.vmname = "DB01"
+      v.cpus = 2
+      v.memory = 2048
+      v.mac = "00155D100030"
+      v.auto_start_action = "Nothing"
+      v.auto_stop_action = "ShutDown"
+    end
+  end
+
+  # ----------------------------------------------------------------------------
+  # VM 4: FILE01 — Samba Media Asset Repository & User Home Shares
+  # ----------------------------------------------------------------------------
+  config.vm.define "file01" do |file|
+    file.vm.hostname = "FILE01.corp.streamflix.lab"
+    file.vm.network "public_network", bridge: "vSwitch-Internal-NAT"
+    file.vm.provider "hyperv" do |v|
+      v.vmname = "FILE01"
+      v.cpus = 2
+      v.memory = 2048
+      v.mac = "00155D100040"
+      v.auto_start_action = "Nothing"
+      v.auto_stop_action = "ShutDown"
+    end
+  end
+end
