@@ -123,7 +123,7 @@ foreach ($node in $deployQueue) {
     $portResults = @()
     foreach ($p in $node.Ports) {
         $conn = Test-NetConnection -ComputerName $node.IP -Port $p -WarningAction SilentlyContinue
-        $portResults += "$p:$($conn.TcpTestSucceeded)"
+        $portResults += "$($p):$($conn.TcpTestSucceeded)"
         if ($conn.TcpTestSucceeded) {
             Write-Host " [PORT OK] Port $p is listening on $($node.IP)" -ForegroundColor Green
         } else {
