@@ -162,7 +162,6 @@ ethernets:
     Set-Content -Path (Join-Path $tempDir "network-config") -Value $networkConfig -Encoding Ascii
 
     $fsi = New-Object -ComObject IMAPI2FS.MsftFileSystemImage
-    $fsi.ChooseImageDefaultsForMediaType(1)
     $fsi.VolumeName = "cidata"
     $fsi.FileSystemsToCreate = 1
     $root = $fsi.Root
