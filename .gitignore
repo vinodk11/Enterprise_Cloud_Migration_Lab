@@ -21,6 +21,13 @@ override.tf.json
 *_override.tf
 *_override.tf.json
 
+# Temporary files
+*scripts-old*
+*automation*
+
 # OS files
 .DS_Store
 Thumbs.db
+
+
+.scripts_*
