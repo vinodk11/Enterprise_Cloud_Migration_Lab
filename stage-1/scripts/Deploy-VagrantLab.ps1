@@ -68,9 +68,10 @@ $reservations = @(
     @{ IP = "192.168.10.40"; MAC = "00-15-5D-10-00-40"; Name = "FILE01" }
 )
 
+$existingReservations = Get-DhcpServerv4Reservation -ScopeId 192.168.10.0 -ErrorAction SilentlyContinue
 foreach ($res in $reservations) {
-    $existingRes = Get-DhcpServerv4Reservation -ScopeId 192.168.10.0 -IPAddress $res.IP -ErrorAction SilentlyContinue
-    if (-not $existingRes) {
+    $found = $existingReservations | Where-Object { $_.IPAddress.IPAddressToString -eq $res.IP }
+    if (-not $found) {
         Add-DhcpServerv4Reservation -ScopeId 192.168.10.0 -IPAddress $res.IP -ClientId $res.MAC -Name $res.Name
     }
 }
