@@ -12,12 +12,34 @@
 
 [CmdletBinding()]
 param(
-    [string]$VagrantBaseDir = "F:\Hyper-V\Vagrant",
-    [string]$VagrantHome    = "F:\Hyper-V\.vagrant.d",
+    [string]$VagrantBaseDir = "",
+    [string]$VagrantHome    = "",
     [string]$TargetVM       = "ALL"  # Options: ALL, dc01, db01, file01, app01
 )
 
 $ErrorActionPreference = "Stop"
+
+# Auto-detect best storage path
+if (-not $VagrantBaseDir) {
+    if (Test-Path "F:\") {
+        $VagrantBaseDir = "F:\Hyper-V\Vagrant"
+    } else {
+        $repoVagrant = Join-Path $PSScriptRoot "..\vagrant"
+        if (Test-Path $repoVagrant) {
+            $VagrantBaseDir = (Resolve-Path $repoVagrant).Path
+        } else {
+            $VagrantBaseDir = "C:\Hyper-V\Vagrant"
+        }
+    }
+}
+
+if (-not $VagrantHome) {
+    if (Test-Path "F:\") {
+        $VagrantHome = "F:\Hyper-V\.vagrant.d"
+    } else {
+        $VagrantHome = "$env:USERPROFILE\.vagrant.d"
+    }
+}
 
 Write-Host "==================================================================" -ForegroundColor Cyan
 Write-Host "  Enterprise Cloud Migration Lab: Sequential VM Fleet Deployer    " -ForegroundColor Cyan
