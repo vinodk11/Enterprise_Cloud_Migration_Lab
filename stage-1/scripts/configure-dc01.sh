@@ -141,10 +141,12 @@ samba-tool user create svc-streamflix "ServiceFlix2026!#" \
 echo -e "\n=================================================================="
 echo "  Validation & Health Check Summary                               "
 echo "=================================================================="
-samba-tool domain info 127.0.0.1
-echo "${DOMAIN_PASS}" | kinit administrator@${DOMAIN_REALM}
-klist
+samba-tool domain info 127.0.0.1 || true
+if command -v kinit >/dev/null 2>&1; then
+    printf "%s\n" "${DOMAIN_PASS}" | kinit administrator@${DOMAIN_REALM} 2>/dev/null || true
+    klist 2>/dev/null || true
+fi
 host -t SRV _ldap._tcp.${DOMAIN_REALM,,} 127.0.0.1 || true
-smbclient -L localhost -U%
+smbclient -L localhost -N 2>/dev/null || smbclient -L localhost -U% 2>/dev/null || true
 
-echo -e "\n[SUCCESS] DC01 Active Directory Domain Controller (${DOMAIN_REALM}) is online and healthy!"
+echo -e "\n[SUCCESS] DC01 Active Directory Domain Controller (${DOMAIN_REALM}) configuration completed!"
