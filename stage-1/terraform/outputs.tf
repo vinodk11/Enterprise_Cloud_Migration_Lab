@@ -94,3 +94,8 @@ output "cockpit_web_ui_url" {
   value       = "https://${azurerm_public_ip.hv01_pip.ip_address}:9090"
 }
 
+output "streamflix_app_url" {
+  description = "Direct HTTP URL for the StreamFlix web application."
+  value       = "http://${azurerm_public_ip.hv01_pip.ip_address}"
+}
+

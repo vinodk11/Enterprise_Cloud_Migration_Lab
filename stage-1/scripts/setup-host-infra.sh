@@ -163,6 +163,17 @@ if command -v vagrant >/dev/null 2>&1; then
     fi
 fi
 
+# ==============================================================================
+# STEP 5: CONFIGURE NAT PORT FORWARDING (Port 80 -> APP01 10.10.10.20:80)
+# ==============================================================================
+echo -e "\n>>> [5/5] Configuring Port 80 Forwarding to APP01..."
+sysctl -w net.ipv4.ip_forward=1 >/dev/null
+iptables -t nat -C PREROUTING -p tcp --dport 80 -j DNAT --to-destination 10.10.10.20:80 2>/dev/null || \
+  iptables -t nat -A PREROUTING -p tcp --dport 80 -j DNAT --to-destination 10.10.10.20:80
+iptables -C FORWARD -p tcp -d 10.10.10.20 --dport 80 -j ACCEPT 2>/dev/null || \
+  iptables -A FORWARD -p tcp -d 10.10.10.20 --dport 80 -j ACCEPT
+echo "[OK] Inbound Port 80 forwarded to APP01 (10.10.10.20:80)."
+
 echo -e "\n=================================================================="
 echo "  Host Infrastructure Configuration Completed Successfully!       "
 echo "=================================================================="
