@@ -40,6 +40,9 @@ resource "azurerm_linux_virtual_machine" "hv01" {
   disable_password_authentication = false
   network_interface_ids           = [azurerm_network_interface.hv01_nic.id]
 
+  # Init Boot Script (Cloud-Init custom_data)
+  custom_data = filebase64("${path.module}/../scripts/install-host-prereqs.sh")
+
   os_disk {
     name                 = "osdisk-hv01"
     caching              = "ReadWrite"
@@ -77,19 +80,17 @@ resource "azurerm_virtual_machine_data_disk_attachment" "hv01_data_attach" {
   caching            = "ReadWrite"
 }
 
-# Custom Script Extension to install KVM, QEMU, libvirt, Cockpit, and Vagrant
-resource "azurerm_virtual_machine_extension" "hv01_kvm_feature" {
-  name                 = "Install-KVM-Cockpit-Feature"
+# Custom Script Extension to execute the init boot script after data disk attachment
+resource "azurerm_virtual_machine_extension" "hv01_init_boot" {
+  name                 = "Init-Boot-Script"
   virtual_machine_id   = azurerm_linux_virtual_machine.hv01.id
   publisher            = "Microsoft.Azure.Extensions"
   type                 = "CustomScript"
   type_handler_version = "2.1"
 
-  settings = <<SETTINGS
-    {
-        "commandToExecute": "export DEBIAN_FRONTEND=noninteractive && apt-get update && apt-get install -y qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils virtinst cockpit cockpit-machines cpu-checker git curl wget jq build-essential libxslt-dev libxml2-dev libvirt-dev zlib1g-dev ruby-dev && systemctl enable --now libvirtd cockpit.socket && usermod -aG kvm,libvirt ${var.admin_username} || true"
-    }
-SETTINGS
+  protected_settings = jsonencode({
+    commandToExecute = "echo '${filebase64("${path.module}/../scripts/install-host-prereqs.sh")}' | base64 -d | bash"
+  })
 
   tags = var.tags
 
