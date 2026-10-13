@@ -79,22 +79,3 @@ resource "azurerm_virtual_machine_data_disk_attachment" "hv01_data_attach" {
   lun                = 0
   caching            = "ReadWrite"
 }
-
-# Custom Script Extension to execute the init boot script after data disk attachment
-resource "azurerm_virtual_machine_extension" "hv01_init_boot" {
-  name                 = "Init-Boot-Script"
-  virtual_machine_id   = azurerm_linux_virtual_machine.hv01.id
-  publisher            = "Microsoft.Azure.Extensions"
-  type                 = "CustomScript"
-  type_handler_version = "2.1"
-
-  protected_settings = jsonencode({
-    commandToExecute = "echo '${filebase64("${path.module}/../scripts/install-host-prereqs.sh")}' | base64 -d | bash"
-  })
-
-  tags = var.tags
-
-  depends_on = [
-    azurerm_virtual_machine_data_disk_attachment.hv01_data_attach
-  ]
-}

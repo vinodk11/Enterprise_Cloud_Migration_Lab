@@ -53,10 +53,29 @@ sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/ss
 sed -i 's/^#\?KbdInteractiveAuthentication .*/KbdInteractiveAuthentication yes/' /etc/ssh/sshd_config
 systemctl reload ssh || systemctl restart ssh || true
 
+# Helper: Wait for background apt / unattended-upgrades lock to clear
+wait_for_apt() {
+    local max_wait=300
+    local waited=0
+    while fuser /var/lib/dpkg/lock >/dev/null 2>&1 || \
+          fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
+          fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
+        echo "[*] Waiting for apt / unattended-upgrades lock to release ($waited s)..."
+        sleep 5
+        waited=$((waited + 5))
+        if [[ $waited -ge $max_wait ]]; then
+            echo "[!] Warning: Timeout waiting for apt locks. Killing stale lock holders..."
+            fuser -k /var/lib/dpkg/lock-frontend 2>/dev/null || true
+            break
+        fi
+    done
+}
+
 # ==============================================================================
 # STEP 1: VERIFY HARDWARE VIRTUALIZATION
 # ==============================================================================
 echo -e "\n>>> [1/7] Verifying KVM Hardware Virtualization Extensions..."
+wait_for_apt
 apt-get update -qq
 apt-get install -y -qq cpu-checker
 
