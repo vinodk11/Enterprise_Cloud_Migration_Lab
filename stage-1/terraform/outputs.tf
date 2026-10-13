@@ -84,3 +84,13 @@ output "hv01_admin_password" {
   sensitive   = true
 }
 
+output "hv01_public_ip" {
+  description = "The public IP address of the HV01 host."
+  value       = azurerm_public_ip.hv01_pip.ip_address
+}
+
+output "cockpit_web_ui_url" {
+  description = "Direct HTTPS URL for the Cockpit Virtual Machines web console."
+  value       = "https://${azurerm_public_ip.hv01_pip.ip_address}:9090"
+}
+

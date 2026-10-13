@@ -20,3 +20,18 @@ resource "azurerm_subnet_network_security_group_association" "management_nsg_ass
   subnet_id                 = azurerm_subnet.management_subnet.id
   network_security_group_id = azurerm_network_security_group.onprem_nsg.id
 }
+
+# Inbound Rule: Allow Cockpit Web Console UI (Port 9090)
+resource "azurerm_network_security_rule" "allow_cockpit" {
+  name                        = "Allow-Cockpit-WebUI"
+  priority                    = 1000
+  direction                   = "Inbound"
+  access                      = "Allow"
+  protocol                    = "Tcp"
+  source_port_range           = "*"
+  destination_port_range      = "9090"
+  source_address_prefix       = "*"
+  destination_address_prefix  = "*"
+  resource_group_name         = azurerm_resource_group.onprem_rg.name
+  network_security_group_name = azurerm_network_security_group.onprem_nsg.name
+}

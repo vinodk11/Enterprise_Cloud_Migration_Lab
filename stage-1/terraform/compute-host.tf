@@ -1,5 +1,16 @@
 # Stage 1.2 — Ubuntu 24.04 LTS KVM/QEMU Host (HV01)
 
+# Dedicated Public IP for HV01 Host (Direct Cockpit UI Access)
+resource "azurerm_public_ip" "hv01_pip" {
+  name                = "pip-hv01"
+  location            = azurerm_resource_group.onprem_rg.location
+  resource_group_name = azurerm_resource_group.onprem_rg.name
+  allocation_method   = "Static"
+  sku                 = "Standard"
+
+  tags = var.tags
+}
+
 # Primary Network Interface for HV01
 resource "azurerm_network_interface" "hv01_nic" {
   name                           = "nic-hv01"
@@ -12,6 +23,7 @@ resource "azurerm_network_interface" "hv01_nic" {
     subnet_id                     = azurerm_subnet.management_subnet.id
     private_ip_address_allocation = "Static"
     private_ip_address            = var.hv01_private_ip
+    public_ip_address_id          = azurerm_public_ip.hv01_pip.id
   }
 
   tags = var.tags
