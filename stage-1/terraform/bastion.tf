@@ -24,7 +24,9 @@ resource "azurerm_bastion_host" "onprem_bastion" {
   name                = var.bastion_host_name
   location            = azurerm_resource_group.onprem_rg.location
   resource_group_name = azurerm_resource_group.onprem_rg.name
-  sku                 = "Basic"
+  sku                 = "Standard"
+  tunneling_enabled   = true
+  ip_connect_enabled  = true
 
   ip_configuration {
     name                 = "bastion-ip-config"

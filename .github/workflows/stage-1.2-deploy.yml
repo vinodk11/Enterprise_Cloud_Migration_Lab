@@ -1,0 +1,170 @@
+name: "Stage 1.2 — Host Prerequisites & VM Fleet Deployment"
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Deployment Action"
+        required: true
+        default: "deploy-fleet"
+        type: choice
+        options:
+          - "deploy-fleet"
+          - "setup-prereqs-only"
+          - "validate-fleet-only"
+          - "destroy-vms"
+      vm_target:
+        description: "Target VMs (leave 'all' for all 4 VMs, or specify e.g. 'db01 file01 app01')"
+        required: false
+        default: "all"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy-lab:
+    name: "Deploy & Validate On-Prem Lab Fleet"
+    runs-on: ubuntu-latest
+
+    env:
+      RESOURCE_GROUP: "rg-onprem-lab"
+      VM_NAME: "vm-hv01"
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Azure CLI Login
+        uses: azure/login@v2
+        with:
+          creds: json
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        continue-on-error: true
+
+      # Fallback to service principal secret login if federated token is not used
+      - name: Azure Login Fallback (Service Principal)
+        if: env.ARM_CLIENT_SECRET != ''
+        run: |
+          az login --service-principal \
+            -u "${{ secrets.AZURE_CLIENT_ID }}" \
+            -p "${{ secrets.AZURE_CLIENT_SECRET }}" \
+            --tenant "${{ secrets.AZURE_TENANT_ID }}"
+          az account set --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+
+      # ------------------------------------------------------------------------
+      # STAGE 1: SYNC CODE REPOSITORY TO AZURE HOST
+      # ------------------------------------------------------------------------
+      - name: Sync Code Repository to HV01
+        run: |
+          echo "Updating repository code on ${VM_NAME}..."
+          az vm run-command invoke \
+            --resource-group "${RESOURCE_GROUP}" \
+            --name "${VM_NAME}" \
+            --command-id RunShellScript \
+            --scripts "
+              if [ ! -d '/home/labadmin/Enterprise_Cloud_Migration_Lab' ]; then
+                git clone https://github.com/vinodk11/Enterprise_Cloud_Migration_Lab.git /home/labadmin/Enterprise_Cloud_Migration_Lab
+              else
+                cd /home/labadmin/Enterprise_Cloud_Migration_Lab && git pull origin main
+              fi
+              chown -R labadmin:labadmin /home/labadmin/Enterprise_Cloud_Migration_Lab
+              chmod +x /home/labadmin/Enterprise_Cloud_Migration_Lab/stage-1/scripts/*.sh
+            "
+
+      # ------------------------------------------------------------------------
+      # STAGE 2: INSTALL HOST PREREQUISITES & STORAGE/NET
+      # ------------------------------------------------------------------------
+      - name: Configure Host Prerequisites & Infrastructure
+        if: ${{ github.event.inputs.action == 'deploy-fleet' || github.event.inputs.action == 'setup-prereqs-only' }}
+        run: |
+          echo "Installing host packages, KVM, Cockpit, Vagrant, and setting up storage pool / network..."
+          az vm run-command invoke \
+            --resource-group "${RESOURCE_GROUP}" \
+            --name "${VM_NAME}" \
+            --command-id RunShellScript \
+            --scripts "
+              sudo bash /home/labadmin/Enterprise_Cloud_Migration_Lab/stage-1/scripts/install-host-prereqs.sh labadmin
+              sudo bash /home/labadmin/Enterprise_Cloud_Migration_Lab/stage-1/scripts/setup-host-infra.sh
+            "
+
+      # ------------------------------------------------------------------------
+      # STAGE 3: SEQUENTIALLY DEPLOY VM FLEET
+      # ------------------------------------------------------------------------
+      - name: Deploy VM Fleet (DC01 -> DB01 -> FILE01 -> APP01)
+        if: ${{ github.event.inputs.action == 'deploy-fleet' }}
+        run: |
+          TARGET_VMS="${{ github.event.inputs.vm_target }}"
+          CMD_ARGS=""
+          if [ "${TARGET_VMS}" != "all" ]; then
+            CMD_ARGS="${TARGET_VMS}"
+          fi
+
+          echo "Starting sequential provisioning loop for: ${TARGET_VMS}..."
+          az vm run-command invoke \
+            --resource-group "${RESOURCE_GROUP}" \
+            --name "${VM_NAME}" \
+            --command-id RunShellScript \
+            --scripts "
+              sudo -u labadmin -H bash -c '
+                cd /home/labadmin/Enterprise_Cloud_Migration_Lab/stage-1/scripts
+                ./deploy-vms-loop.sh ${CMD_ARGS}
+              '
+            "
+
+      # ------------------------------------------------------------------------
+      # STAGE 4: VALIDATE FLEET HEALTH
+      # ------------------------------------------------------------------------
+      - name: Validate Fleet Health & Services
+        if: ${{ github.event.inputs.action == 'deploy-fleet' || github.event.inputs.action == 'validate-fleet-only' }}
+        run: |
+          echo "Executing health checks across DC01, DB01, FILE01, and APP01..."
+          OUTPUT=$(az vm run-command invoke \
+            --resource-group "${RESOURCE_GROUP}" \
+            --name "${VM_NAME}" \
+            --command-id RunShellScript \
+            --scripts "
+              sudo -u labadmin -H bash -c '
+                virsh list --all
+                echo \"--- NETWORK PINGS ---\"
+                for ip in 10.10.10.10 10.10.10.30 10.10.10.40 10.10.10.20; do
+                  ping -c 1 -W 1 \$ip && echo \"[OK] \$ip Reachable\" || echo \"[FAIL] \$ip Unreachable\"
+                done
+
+                echo \"--- APPLICATION HEALTH ---\"
+                curl -s --connect-timeout 3 http://10.10.10.20/api/health || echo \"API Offline\"
+              '
+            " --query "value[0].message" -o tsv)
+
+          echo "${OUTPUT}"
+          echo "### Lab Fleet Status" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${OUTPUT}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      # ------------------------------------------------------------------------
+      # STAGE 5: DESTROY VMS (TEARDOWN)
+      # ------------------------------------------------------------------------
+      - name: Teardown Guest VMs
+        if: ${{ github.event.inputs.action == 'destroy-vms' }}
+        run: |
+          echo "Destroying guest VMs on ${VM_NAME}..."
+          az vm run-command invoke \
+            --resource-group "${RESOURCE_GROUP}" \
+            --name "${VM_NAME}" \
+            --command-id RunShellScript \
+            --scripts "
+              sudo -u labadmin -H bash -c '
+                for vm in app01 file01 db01 dc01; do
+                  if [ -d \"/home/labadmin/Enterprise_Cloud_Migration_Lab/stage-1/vagrant/\$vm\" ]; then
+                    cd \"/home/labadmin/Enterprise_Cloud_Migration_Lab/stage-1/vagrant/\$vm\" && vagrant destroy -f || true
+                  fi
+                done
+              '
+            "
