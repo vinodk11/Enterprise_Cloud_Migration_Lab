@@ -1,16 +1,9 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Enterprise Cloud Migration Lab — Phase 7: PostgreSQL Database Server
-# Target Machine: DB01 (192.168.10.30)
-#
-# What this script executes end-to-end on DB01:
-#   1. Sets hostname to DB01.corp.streamflix.lab
-#   2. Installs PostgreSQL and dependencies non-interactively
-#   3. Configures postgresql.conf to listen on all interfaces
-#   4. Restricts pg_hba.conf to allow only APP01 (192.168.10.20) and localhost
-#   5. Creates database 'streamflix_db' and user 'streamflix_user'
-#   6. Applies schema.sql (tables: users, movies, watch_history) and seed data
-#   7. Validates local and TCP database access
+# Enterprise Cloud Migration Lab — DB01: PostgreSQL Database Server
+# Target Machine: DB01 (10.10.10.30)
+# Domain: CORP.LOCAL
+# OS: Ubuntu Server 24.04 LTS (bento/ubuntu-24.04)
 # ==============================================================================
 
 set -euo pipefail
@@ -18,7 +11,10 @@ set -euo pipefail
 DB_NAME="streamflix_db"
 DB_USER="streamflix_user"
 DB_PASS="StreamFlixPass2026!"
-APP_IP="192.168.10.20"
+STATIC_IP="10.10.10.30"
+APP_IP="10.10.10.20"
+GATEWAY_IP="10.10.10.1"
+DC_IP="10.10.10.10"
 
 echo "=================================================================="
 echo "  Enterprise Cloud Migration Lab: DB01 PostgreSQL Setup           "
@@ -31,14 +27,38 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 echo -e "\n>>> [1/6] Configuring Hostname and /etc/hosts..."
-hostnamectl set-hostname DB01.corp.streamflix.lab
+hostnamectl set-hostname db01.corp.local
 sed -i '/127.0.1.1/d' /etc/hosts
-if ! grep -q "192.168.10.30 DB01.corp.streamflix.lab DB01" /etc/hosts; then
-    echo "192.168.10.30 DB01.corp.streamflix.lab DB01" >> /etc/hosts
+if ! grep -q "${STATIC_IP} db01.corp.local db01" /etc/hosts; then
+    echo "${STATIC_IP} db01.corp.local db01" >> /etc/hosts
 fi
 echo "[OK] Hostname configured: $(hostname -f)"
 
-echo -e "\n>>> [2/6] Installing PostgreSQL Engine..."
+echo -e "\n>>> [2/6] Binding Static IP ${STATIC_IP} via Netplan..."
+LAB_IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^eth1|^enp2s0' | head -n 1 || true)
+if [[ -z "${LAB_IFACE}" ]]; then
+    LAB_IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -v "lo" | sed -n '2p' || true)
+fi
+
+if [[ -n "${LAB_IFACE}" ]]; then
+    cat <<EOF > /etc/netplan/60-migration-lab.yaml
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    ${LAB_IFACE}:
+      addresses:
+        - ${STATIC_IP}/24
+      nameservers:
+        addresses: [${DC_IP}, 1.1.1.1]
+EOF
+    chmod 600 /etc/netplan/60-migration-lab.yaml
+    netplan apply || true
+    echo "[OK] Netplan configured on interface ${LAB_IFACE} with IP ${STATIC_IP}/24."
+fi
+ip addr add "${STATIC_IP}/24" dev "${LAB_IFACE:-eth1}" 2>/dev/null || true
+
+echo -e "\n>>> [3/6] Installing PostgreSQL Engine..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq postgresql postgresql-contrib
@@ -47,29 +67,29 @@ systemctl enable --now postgresql
 PG_VERSION=$(ls /etc/postgresql/ | head -n 1)
 echo "[OK] PostgreSQL ${PG_VERSION} installed and running."
 
-echo -e "\n>>> [3/6] Configuring Network Listening & Access Control (pg_hba.conf)..."
+echo -e "\n>>> [4/6] Configuring Network Listening & Access Control (pg_hba.conf)..."
 PG_CONF="/etc/postgresql/${PG_VERSION}/main/postgresql.conf"
 PG_HBA="/etc/postgresql/${PG_VERSION}/main/pg_hba.conf"
 
-# Listen on all IP addresses (network-facing)
 sed -i "s/^#listen_addresses = 'localhost'/listen_addresses = '*'/" "$PG_CONF"
 sed -i "s/^listen_addresses = 'localhost'/listen_addresses = '*'/" "$PG_CONF"
 
-# Restrict access: Allow APP01 (192.168.10.20) and localhost only
+# Allow APP01 (10.10.10.20) and lab subnet (10.10.10.0/24)
 if ! grep -q "host    ${DB_NAME}     ${DB_USER}     ${APP_IP}/32" "$PG_HBA"; then
     cat <<EOF >> "$PG_HBA"
 
 # StreamFlix Application Access Control
 host    ${DB_NAME}     ${DB_USER}     ${APP_IP}/32            scram-sha-256
+host    ${DB_NAME}     ${DB_USER}     10.10.10.0/24           scram-sha-256
 host    ${DB_NAME}     ${DB_USER}     127.0.0.1/32            scram-sha-256
 host    all             postgres        127.0.0.1/32            scram-sha-256
 EOF
 fi
 
 systemctl restart postgresql
-echo "[OK] PostgreSQL configured to listen on port 5432, restricted to ${APP_IP}."
+echo "[OK] PostgreSQL listening on port 5432, allowed for ${APP_IP} and 10.10.10.0/24."
 
-echo -e "\n>>> [4/6] Creating Database and Application User..."
+echo -e "\n>>> [5/6] Creating Database and Application User..."
 sudo -u postgres psql <<EOF
 DO \$\$
 BEGIN
@@ -87,9 +107,7 @@ WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${DB_NAME}')\gexec
 GRANT ALL PRIVILEGES ON DATABASE ${DB_NAME} TO ${DB_USER};
 EOF
 
-echo "[OK] Database '${DB_NAME}' and role '${DB_USER}' ready."
-
-echo -e "\n>>> [5/6] Applying Schema and Seed Data..."
+# Schema and seed data
 cat << 'SCHEMA_EOF' | sudo -u postgres psql -d "${DB_NAME}"
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
@@ -122,11 +140,10 @@ CREATE TABLE IF NOT EXISTS watch_history (
     UNIQUE(user_id, movie_id)
 );
 
--- Seed Sample Movie Catalog
 INSERT INTO movies (title, description, release_year, genre, duration_minutes, poster_path, video_path)
 VALUES 
 ('Cloud Migration Chronicles', 'An epic documentary following legacy monolith migration to cloud infrastructure.', 2026, 'Documentary', 85, '/media/posters/migration.svg', '/media/videos/migration.mp4'),
-('Hyper-V Horizons', 'A deep dive into Type-1 hypervisors and nested virtualization architecture.', 2025, 'Sci-Fi', 110, '/media/posters/hyperv.svg', '/media/videos/hyperv.mp4'),
+('KVM Virtualization Horizons', 'A deep dive into Linux Kernel-based Virtual Machine architecture and libvirt.', 2025, 'Sci-Fi', 110, '/media/posters/hyperv.svg', '/media/videos/hyperv.mp4'),
 ('Samba in the Datacenter', 'Building resilient Active Directory domains on Linux platforms.', 2024, 'Tech Drama', 95, '/media/posters/samba.svg', '/media/videos/samba.mp4')
 ON CONFLICT DO NOTHING;
 
@@ -134,10 +151,9 @@ GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO streamflix_user;
 GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO streamflix_user;
 SCHEMA_EOF
 
-echo "[OK] Schema and initial seed movies created."
+echo "[OK] Database '${DB_NAME}' schema and seed catalog ready."
 
 echo -e "\n>>> [6/6] Validation & Connection Check..."
-echo "Verifying local connection as ${DB_USER}..."
 PGPASSWORD="${DB_PASS}" psql -h 127.0.0.1 -U "${DB_USER}" -d "${DB_NAME}" -c "SELECT id, title, genre, release_year FROM movies;"
 
-echo -e "\n[SUCCESS] DB01 PostgreSQL Database Server is online, secured, and ready for APP01!"
+echo -e "\n[SUCCESS] DB01 PostgreSQL Database Server is online and ready for APP01!"

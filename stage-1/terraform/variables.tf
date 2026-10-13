@@ -89,13 +89,13 @@ variable "vm_size" {
 
 variable "admin_username" {
   type        = string
-  description = "Administrator username for the Windows Server VM."
+  description = "Administrator username for the Linux Host VM (HV01)."
   default     = "labadmin"
 }
 
 variable "admin_password" {
   type        = string
-  description = "Administrator password for the Windows Server VM (leave null to auto-generate)."
+  description = "Administrator password for the Linux Host VM (HV01) (leave null to auto-generate)."
   default     = null
   sensitive   = true
 }

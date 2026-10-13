@@ -1,24 +1,20 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Enterprise Cloud Migration Lab — Phase 8: StreamFlix Web & API Server
-# Target Machine: APP01 (192.168.10.20)
-#
-# What this script executes end-to-end on APP01:
-#   1. Sets hostname to APP01.corp.streamflix.lab
-#   2. Installs Node.js LTS, npm, Nginx, and cifs-utils
-#   3. Mounts Samba media share from FILE01 (192.168.10.40:/media) to /mnt/file01/media
-#   4. Deploys Express Backend API as a systemd service (connecting to DB01)
-#   5. Builds and deploys React Frontend to /var/www/streamflix/frontend/dist
-#   6. Configures Nginx Reverse Proxy with HTTP 206 Byte-Range streaming
-#   7. Validates health endpoints and web application delivery
+# Enterprise Cloud Migration Lab — APP01: StreamFlix Web & API Server
+# Target Machine: APP01 (10.10.10.20)
+# Domain: CORP.LOCAL
+# OS: Ubuntu Server 24.04 LTS (bento/ubuntu-24.04)
 # ==============================================================================
 
 set -euo pipefail
 
 APP_ROOT="/var/www/streamflix"
 MOUNT_DIR="/mnt/file01/media"
-FILE01_IP="192.168.10.40"
-DB01_IP="192.168.10.30"
+STATIC_IP="10.10.10.20"
+FILE01_IP="10.10.10.40"
+DB01_IP="10.10.10.30"
+DC01_IP="10.10.10.10"
+GATEWAY_IP="10.10.10.1"
 
 echo "=================================================================="
 echo "  Enterprise Cloud Migration Lab: APP01 StreamFlix Deployment     "
@@ -31,40 +27,69 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 echo -e "\n>>> [1/7] Configuring Hostname and /etc/hosts..."
-hostnamectl set-hostname APP01.corp.streamflix.lab
+hostnamectl set-hostname app01.corp.local
 sed -i '/127.0.1.1/d' /etc/hosts
-if ! grep -q "192.168.10.20 APP01.corp.streamflix.lab APP01" /etc/hosts; then
-    echo "192.168.10.20 APP01.corp.streamflix.lab APP01" >> /etc/hosts
+if ! grep -q "${STATIC_IP} app01.corp.local app01" /etc/hosts; then
+    echo "${STATIC_IP} app01.corp.local app01" >> /etc/hosts
 fi
 echo "[OK] Hostname configured: $(hostname -f)"
 
-echo -e "\n>>> [2/7] Installing Node.js, npm, Nginx, and CIFS utilities..."
+echo -e "\n>>> [2/7] Binding Static IP ${STATIC_IP} via Netplan..."
+LAB_IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^eth1|^enp2s0' | head -n 1 || true)
+if [[ -z "${LAB_IFACE}" ]]; then
+    LAB_IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -v "lo" | sed -n '2p' || true)
+fi
+
+if [[ -n "${LAB_IFACE}" ]]; then
+    cat <<EOF > /etc/netplan/60-migration-lab.yaml
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    ${LAB_IFACE}:
+      addresses:
+        - ${STATIC_IP}/24
+      nameservers:
+        addresses: [${DC01_IP}, 1.1.1.1]
+EOF
+    chmod 600 /etc/netplan/60-migration-lab.yaml
+    netplan apply || true
+    echo "[OK] Netplan configured on interface ${LAB_IFACE} with IP ${STATIC_IP}/24."
+fi
+ip addr add "${STATIC_IP}/24" dev "${LAB_IFACE:-eth1}" 2>/dev/null || true
+
+echo -e "\n>>> [3/7] Installing Node.js, npm, Nginx, and CIFS utilities..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq nodejs npm nginx cifs-utils curl
 
 echo "[OK] Dependencies installed: Node $(node -v), Nginx $(nginx -v 2>&1 | cut -d'/' -f2)"
 
-echo -e "\n>>> [3/7] Mounting Media Share from FILE01 (${FILE01_IP})..."
+echo -e "\n>>> [4/7] Mounting Media Share from FILE01 (${FILE01_IP})..."
 mkdir -p "${MOUNT_DIR}"
-# Attempt mount from FILE01
+# Attempt CIFS mount with retry
+for i in {1..5}; do
+    if mount -t cifs "//${FILE01_IP}/media" "${MOUNT_DIR}" -o guest,ro,iocharset=utf8 2>/dev/null; then
+        echo "[OK] Successfully mounted //${FILE01_IP}/media to ${MOUNT_DIR}"
+        break
+    else
+        echo "[*] Waiting for FILE01 Samba share (attempt $i/5)..."
+        sleep 3
+    fi
+done
+
 if ! mountpoint -q "${MOUNT_DIR}"; then
-    mount -t cifs "//${FILE01_IP}/media" "${MOUNT_DIR}" -o guest,ro,iocharset=utf8 || {
-        echo "[!] Warning: Direct CIFS mount failed. Creating fallback local media symlink for testing."
-        mkdir -p "${MOUNT_DIR}/videos" "${MOUNT_DIR}/posters"
-    }
+    echo "[!] Warning: Direct CIFS mount failed. Creating fallback local media structure."
+    mkdir -p "${MOUNT_DIR}/videos" "${MOUNT_DIR}/posters"
 fi
 
-# Add persistent mount to /etc/fstab if not present
 if ! grep -q "//${FILE01_IP}/media" /etc/fstab; then
     echo "//${FILE01_IP}/media ${MOUNT_DIR} cifs guest,ro,iocharset=utf8,nofail 0 0" >> /etc/fstab
 fi
-echo "[OK] Media storage mounted at ${MOUNT_DIR}."
 
-echo -e "\n>>> [4/7] Deploying StreamFlix Express Backend API..."
+echo -e "\n>>> [5/7] Deploying StreamFlix Express Backend API..."
 mkdir -p "${APP_ROOT}/backend"
 
-# Copy backend files from source repository or create if executing standalone
 cat << 'BACKEND_EOF' > "${APP_ROOT}/backend/package.json"
 {
   "name": "streamflix-backend",
@@ -142,11 +167,9 @@ app.listen(PORT, '0.0.0.0', () => {
 });
 BACKEND_SERVER_EOF
 
-# Install dependencies
 cd "${APP_ROOT}/backend"
 npm install --silent
 
-# Configure systemd service
 cat << 'SYSTEMD_EOF' > /etc/systemd/system/streamflix-backend.service
 [Unit]
 Description=StreamFlix Node.js Express API
@@ -169,10 +192,9 @@ systemctl daemon-reload
 systemctl enable --now streamflix-backend
 echo "[OK] StreamFlix Express API systemd service running on port 5000."
 
-echo -e "\n>>> [5/7] Deploying React Frontend UI..."
+echo -e "\n>>> [6/7] Deploying Frontend UI & Nginx Reverse Proxy..."
 mkdir -p "${APP_ROOT}/frontend/dist"
 
-# Generate high-performance production HTML5/React build bundle
 cat << 'INDEX_HTML_EOF' > "${APP_ROOT}/frontend/dist/index.html"
 <!DOCTYPE html>
 <html lang="en">
@@ -214,7 +236,7 @@ cat << 'INDEX_HTML_EOF' > "${APP_ROOT}/frontend/dist/index.html"
   <div class="hero">
     <span style="font-size:12px;color:#E50914;font-weight:bold;">FEATURED SHOW</span>
     <h2 id="hero-title">Cloud Migration Chronicles</h2>
-    <p id="hero-desc">An epic documentary exploring enterprise modernization, Hyper-V nested virtualization, and seamless workload migration to AWS and Azure.</p>
+    <p id="hero-desc">An epic documentary exploring enterprise modernization, KVM nested virtualization, and seamless workload migration to AWS and Azure.</p>
     <button class="btn" onclick="openPlayer('/media/videos/migration.mp4', 'Cloud Migration Chronicles')">▶ Play Stream (HTTP 206)</button>
   </div>
 
@@ -235,14 +257,13 @@ cat << 'INDEX_HTML_EOF' > "${APP_ROOT}/frontend/dist/index.html"
   </div>
 
   <footer>
-    <div><strong>DC01 (192.168.10.10)</strong><p>Samba Active Directory & DNS</p></div>
-    <div><strong>APP01 (192.168.10.20)</strong><p>React Frontend, Express API, Nginx</p></div>
-    <div><strong>DB01 (192.168.10.30)</strong><p>PostgreSQL Database Engine</p></div>
-    <div><strong>FILE01 (192.168.10.40)</strong><p>Samba CIFS Video & Poster Storage</p></div>
+    <div><strong>DC01 (10.10.10.10)</strong><p>Samba Active Directory & DNS</p></div>
+    <div><strong>APP01 (10.10.10.20)</strong><p>React Frontend, Express API, Nginx</p></div>
+    <div><strong>DB01 (10.10.10.30)</strong><p>PostgreSQL Database Engine</p></div>
+    <div><strong>FILE01 (10.10.10.40)</strong><p>Samba CIFS Video & Poster Storage</p></div>
   </footer>
 
   <script>
-    // Fetch API Health
     fetch('/api/health')
       .then(r => r.json())
       .then(d => {
@@ -253,7 +274,6 @@ cat << 'INDEX_HTML_EOF' > "${APP_ROOT}/frontend/dist/index.html"
         document.getElementById('health').innerHTML = '<span style="color:#e50914">API Disconnected</span>';
       });
 
-    // Fetch Movies from API
     fetch('/api/movies')
       .then(r => r.json())
       .then(movies => {
@@ -289,23 +309,18 @@ cat << 'INDEX_HTML_EOF' > "${APP_ROOT}/frontend/dist/index.html"
 </html>
 INDEX_HTML_EOF
 
-echo "[OK] React UI build deployed to ${APP_ROOT}/frontend/dist."
-
-echo -e "\n>>> [6/7] Configuring Nginx Reverse Proxy & HTTP Range Video Delivery..."
 cat << 'NGINX_EOF' > /etc/nginx/sites-available/streamflix
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
     server_name _;
 
-    # 1. React Frontend Static Build
     location / {
         root /var/www/streamflix/frontend/dist;
         index index.html index.htm;
         try_files $uri $uri/ /index.html;
     }
 
-    # 2. Node.js Express API Reverse Proxy
     location /api/ {
         proxy_pass http://127.0.0.1:5000;
         proxy_http_version 1.1;
@@ -317,7 +332,6 @@ server {
         proxy_cache_bypass $http_upgrade;
     }
 
-    # 3. Static Media & Video Streaming (FILE01 CIFS Mount)
     location /media/ {
         alias /mnt/file01/media/;
         autoindex off;
@@ -339,8 +353,7 @@ echo "[OK] Nginx configured and active on port 80."
 echo -e "\n>>> [7/7] Verifying End-to-End Application Health..."
 sleep 2
 echo "1. Checking Local API Health Endpoint (/api/health):"
-curl -s http://127.0.0.1:5000/api/health | grep -o '"status":"[^"]*"' || true
-curl -s http://127.0.0.1:5000/api/health | grep -o '"database":"[^"]*"' || true
+curl -s http://127.0.0.1:5000/api/health || true
 
 echo -e "\n2. Checking Nginx Reverse Proxy Endpoint (http://127.0.0.1/):"
 curl -I -s http://127.0.0.1/ | head -n 3

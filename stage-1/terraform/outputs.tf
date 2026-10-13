@@ -59,28 +59,28 @@ output "bastion_public_ip" {
 }
 
 output "hv01_vm_id" {
-  description = "The Azure Resource Manager ID of the HV01 Windows VM."
-  value       = azurerm_windows_virtual_machine.hv01.id
+  description = "The Azure Resource Manager ID of the HV01 Linux VM."
+  value       = azurerm_linux_virtual_machine.hv01.id
 }
 
 output "hv01_computer_name" {
-  description = "The internal Windows computer name for the Hyper-V host."
-  value       = azurerm_windows_virtual_machine.hv01.computer_name
+  description = "The internal hostname for the KVM host."
+  value       = azurerm_linux_virtual_machine.hv01.computer_name
 }
 
 output "hv01_private_ip" {
-  description = "The static private IP address of the HV01 Hyper-V host."
-  value       = azurerm_windows_virtual_machine.hv01.private_ip_address
+  description = "The static private IP address of the HV01 KVM host."
+  value       = azurerm_linux_virtual_machine.hv01.private_ip_address
 }
 
 output "hv01_admin_username" {
-  description = "Administrator username for the HV01 Windows host."
-  value       = azurerm_windows_virtual_machine.hv01.admin_username
+  description = "Administrator username for the HV01 Linux host."
+  value       = azurerm_linux_virtual_machine.hv01.admin_username
 }
 
 output "hv01_admin_password" {
-  description = "Administrator password for the HV01 Windows host (sensitive)."
-  value       = azurerm_windows_virtual_machine.hv01.admin_password
+  description = "Administrator password for the HV01 Linux host (sensitive)."
+  value       = azurerm_linux_virtual_machine.hv01.admin_password
   sensitive   = true
 }
 

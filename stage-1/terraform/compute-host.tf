@@ -1,4 +1,4 @@
-# Stage 1.2 — Windows Server 2022 Hyper-V Host (HV01)
+# Stage 1.2 — Ubuntu 24.04 LTS KVM/QEMU Host (HV01)
 
 # Primary Network Interface for HV01
 resource "azurerm_network_interface" "hv01_nic" {
@@ -28,16 +28,17 @@ resource "random_password" "hv01_admin_password" {
   min_special      = 2
 }
 
-# Windows Server 2022 Hyper-V Host Virtual Machine
-resource "azurerm_windows_virtual_machine" "hv01" {
-  name                  = var.hv01_vm_name
-  computer_name         = "HV01"
-  location              = azurerm_resource_group.onprem_rg.location
-  resource_group_name   = azurerm_resource_group.onprem_rg.name
-  size                  = var.vm_size
-  admin_username        = var.admin_username
-  admin_password        = coalesce(var.admin_password, random_password.hv01_admin_password.result)
-  network_interface_ids = [azurerm_network_interface.hv01_nic.id]
+# Ubuntu 24.04 LTS Linux Virtual Machine (HV01)
+resource "azurerm_linux_virtual_machine" "hv01" {
+  name                            = var.hv01_vm_name
+  computer_name                   = "hv01"
+  location                        = azurerm_resource_group.onprem_rg.location
+  resource_group_name             = azurerm_resource_group.onprem_rg.name
+  size                            = var.vm_size
+  admin_username                  = var.admin_username
+  admin_password                  = coalesce(var.admin_password, random_password.hv01_admin_password.result)
+  disable_password_authentication = false
+  network_interface_ids           = [azurerm_network_interface.hv01_nic.id]
 
   os_disk {
     name                 = "osdisk-hv01"
@@ -47,16 +48,16 @@ resource "azurerm_windows_virtual_machine" "hv01" {
   }
 
   source_image_reference {
-    publisher = "MicrosoftWindowsServer"
-    offer     = "WindowsServer"
-    sku       = "2022-datacenter-azure-edition"
+    publisher = "Canonical"
+    offer     = "ubuntu-24_04-lts"
+    sku       = "server"
     version   = "latest"
   }
 
   tags = var.tags
 }
 
-# Dedicated 128GB Managed Data Disk for Hyper-V Guest VHDX storage
+# Dedicated 128GB Managed Data Disk for KVM Guest QCOW2 storage
 resource "azurerm_managed_disk" "hv01_data_disk" {
   name                 = "disk-hv01-vms"
   location             = azurerm_resource_group.onprem_rg.location
@@ -71,22 +72,22 @@ resource "azurerm_managed_disk" "hv01_data_disk" {
 # Attach Data Disk to HV01 at LUN 0
 resource "azurerm_virtual_machine_data_disk_attachment" "hv01_data_attach" {
   managed_disk_id    = azurerm_managed_disk.hv01_data_disk.id
-  virtual_machine_id = azurerm_windows_virtual_machine.hv01.id
+  virtual_machine_id = azurerm_linux_virtual_machine.hv01.id
   lun                = 0
   caching            = "ReadWrite"
 }
 
-# Custom Script Extension to install Hyper-V and RSAT tools
-resource "azurerm_virtual_machine_extension" "hv01_hyperv_feature" {
-  name                 = "Install-HyperV-Feature"
-  virtual_machine_id   = azurerm_windows_virtual_machine.hv01.id
-  publisher            = "Microsoft.Compute"
-  type                 = "CustomScriptExtension"
-  type_handler_version = "1.10"
+# Custom Script Extension to install KVM, QEMU, libvirt, Cockpit, and Vagrant
+resource "azurerm_virtual_machine_extension" "hv01_kvm_feature" {
+  name                 = "Install-KVM-Cockpit-Feature"
+  virtual_machine_id   = azurerm_linux_virtual_machine.hv01.id
+  publisher            = "Microsoft.Azure.Extensions"
+  type                 = "CustomScript"
+  type_handler_version = "2.1"
 
   settings = <<SETTINGS
     {
-        "commandToExecute": "powershell.exe -ExecutionPolicy Unrestricted -Command \"Install-WindowsFeature -Name Hyper-V, RSAT-Hyper-V-Tools -IncludeManagementTools\""
+        "commandToExecute": "export DEBIAN_FRONTEND=noninteractive && apt-get update && apt-get install -y qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils virtinst cockpit cockpit-machines cpu-checker git curl wget jq build-essential libxslt-dev libxml2-dev libvirt-dev zlib1g-dev ruby-dev && systemctl enable --now libvirtd cockpit.socket && usermod -aG kvm,libvirt ${var.admin_username} || true"
     }
 SETTINGS
 

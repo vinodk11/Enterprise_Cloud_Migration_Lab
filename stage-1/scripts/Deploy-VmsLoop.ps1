@@ -52,17 +52,50 @@ $env:VAGRANT_HOME = $VagrantHome
 
 $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 if (-not (Get-Command vagrant -ErrorAction SilentlyContinue)) {
-    $vagrantBin = "C:\Program Files\HashiCorp\Vagrant\bin"
-    if (Test-Path $vagrantBin) {
-        $env:Path += ";$vagrantBin"
-    } else {
-        Throw "Vagrant executable not found in PATH or standard installation directory."
+    $vagrantBins = @("C:\Program Files\Vagrant\bin", "C:\Program Files\HashiCorp\Vagrant\bin")
+    foreach ($bin in $vagrantBins) {
+        if (Test-Path $bin) { $env:Path += ";$bin" }
     }
+}
+if (-not (Get-Command vagrant -ErrorAction SilentlyContinue)) {
+    Throw "Vagrant executable not found in PATH. Please run Install-VagrantAndGit.ps1 first."
 }
 Write-Host "[OK] Using $(& vagrant --version)" -ForegroundColor Green
 
-# 2. Verify DHCP Server Scope & Reservations
-Write-Host "`n>>> [STEP 1/3] Verifying DHCP Server Scope & Reservations..." -ForegroundColor Yellow
+# 2. Host Prerequisites: DHCP Role & Virtual Switch
+Write-Host "`n>>> [STEP 1/3] Verifying Host Hyper-V Switch & DHCP Role..." -ForegroundColor Yellow
+
+# Ensure DHCP role is installed
+if (-not (Get-Command Get-DhcpServerv4Scope -ErrorAction SilentlyContinue)) {
+    Write-Host " Installing Windows DHCP Server Feature..." -ForegroundColor Cyan
+    Install-WindowsFeature DHCP -IncludeManagementTools | Out-Null
+    netsh dhcp add securitygroups | Out-Null
+    Restart-Service dhcpserver -ErrorAction SilentlyContinue
+}
+
+# Ensure Internal Virtual Switch exists
+$switch = Get-VMSwitch -Name "vSwitch-Internal-NAT" -ErrorAction SilentlyContinue
+if (-not $switch) {
+    Write-Host " Creating Internal VMSwitch 'vSwitch-Internal-NAT'..." -ForegroundColor Cyan
+    New-VMSwitch -Name "vSwitch-Internal-NAT" -SwitchType Internal | Out-Null
+}
+
+$adapter = Get-NetAdapter | Where-Object { $_.Name -like "*vSwitch-Internal-NAT*" }
+if ($adapter) {
+    $ip = Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -IPAddress 192.168.10.1 -ErrorAction SilentlyContinue
+    if (-not $ip) {
+        Write-Host " Assigning Gateway IP 192.168.10.1 to vSwitch-Internal-NAT..." -ForegroundColor Cyan
+        New-NetIPAddress -InterfaceIndex $adapter.ifIndex -IPAddress 192.168.10.1 -PrefixLength 24 | Out-Null
+    }
+}
+
+$nat = Get-NetNat -Name "OnPremNAT" -ErrorAction SilentlyContinue
+if (-not $nat) {
+    Write-Host " Configuring NAT Network 'OnPremNAT' (192.168.10.0/24)..." -ForegroundColor Cyan
+    New-NetNat -Name "OnPremNAT" -InternalIPInterfaceAddressPrefix 192.168.10.0/24 | Out-Null
+}
+
+# Verify DHCP Server Scope & Reservations
 $scope = Get-DhcpServerv4Scope -ScopeId 192.168.10.0 -ErrorAction SilentlyContinue
 if (-not $scope) {
     Write-Host " Configuring DHCP scope 192.168.10.0/24..." -ForegroundColor Cyan

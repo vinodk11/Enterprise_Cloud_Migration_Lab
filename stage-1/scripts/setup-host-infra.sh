@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# Enterprise Cloud Migration Lab — Host Storage & Network Setup
+# Target Host: Azure Ubuntu 24.04 LTS (basevm)
+# Target Architecture: KVM / QEMU / libvirt / Cockpit / Vagrant
+# ==============================================================================
+
+set -euo pipefail
+
+echo "=================================================================="
+echo "  Enterprise Cloud Migration Lab: Host Infra Setup (Storage & Net)"
+echo "=================================================================="
+
+# 1. Root check
+if [[ $EUID -ne 0 ]]; then
+   echo "[-] This script must be run as root (e.g. sudo bash setup-host-infra.sh)"
+   exit 1
+fi
+
+# ==============================================================================
+# STEP 1: CONFIGURE STORAGE DISK & MOUNT (/mnt/vm-storage)
+# ==============================================================================
+echo -e "\n>>> [1/4] Verifying VM Storage Disk and Mount Point..."
+MOUNT_POINT="/mnt/vm-storage"
+mkdir -p "${MOUNT_POINT}"
+
+# Check if already mounted
+if mountpoint -q "${MOUNT_POINT}"; then
+    echo "[OK] ${MOUNT_POINT} is already mounted."
+else
+    # Find the target data disk (/dev/sdc or /dev/sdc1)
+    TARGET_DEV=""
+    if [[ -b "/dev/sdc1" ]]; then
+        TARGET_DEV="/dev/sdc1"
+    elif [[ -b "/dev/sdc" ]]; then
+        # Check if sdc has partitions
+        if lsblk -no TYPE /dev/sdc | grep -q "part"; then
+            TARGET_DEV="/dev/sdc1"
+        else
+            TARGET_DEV="/dev/sdc"
+        fi
+    fi
+
+    if [[ -z "${TARGET_DEV}" ]]; then
+        echo "[!] Warning: /dev/sdc not found. Checking existing ext4 disks..."
+        # Fallback to any unmounted data disk
+        CANDIDATE=$(lsblk -dpno NAME,SIZE,TYPE | grep -E "sd[c-z]|nvme[1-9]" | head -n 1 | awk '{print $1}')
+        if [[ -n "${CANDIDATE}" ]]; then
+            TARGET_DEV="${CANDIDATE}"
+        fi
+    fi
+
+    if [[ -n "${TARGET_DEV}" && -b "${TARGET_DEV}" ]]; then
+        echo "[*] Target disk device identified: ${TARGET_DEV}"
+        # Check if filesystem exists
+        FS_TYPE=$(blkid -o value -s TYPE "${TARGET_DEV}" || true)
+        if [[ -z "${FS_TYPE}" ]]; then
+            echo "[*] Formatting ${TARGET_DEV} as ext4..."
+            mkfs.ext4 -F -L vm-storage "${TARGET_DEV}"
+        else
+            echo "[OK] Existing filesystem '${FS_TYPE}' detected on ${TARGET_DEV}. Preserving."
+        fi
+
+        echo "[*] Mounting ${TARGET_DEV} to ${MOUNT_POINT}..."
+        mount "${TARGET_DEV}" "${MOUNT_POINT}"
+
+        # Add to /etc/fstab if missing
+        UUID=$(blkid -s UUID -o value "${TARGET_DEV}" || true)
+        if [[ -n "${UUID}" ]] && ! grep -q "${UUID}" /etc/fstab; then
+            echo "UUID=${UUID} ${MOUNT_POINT} ext4 defaults,nofail 0 2" >> /etc/fstab
+            echo "[OK] Added persistent entry to /etc/fstab (UUID=${UUID})."
+        fi
+    else
+        echo "[!] Notice: Dedicated data disk not detected. Using directory on root filesystem."
+    fi
+fi
+
+# Ensure correct permissions for QEMU / libvirt
+chmod 777 "${MOUNT_POINT}"
+chown -R root:kvm "${MOUNT_POINT}" 2>/dev/null || true
+echo "[OK] Mount point ${MOUNT_POINT} verified. Free space: $(df -h "${MOUNT_POINT}" | tail -n 1 | awk '{print $4}')"
+
+# ==============================================================================
+# STEP 2: CONFIGURE LIBVIRT STORAGE POOL (vm-storage)
+# ==============================================================================
+echo -e "\n>>> [2/4] Verifying libvirt Storage Pool 'vm-storage'..."
+
+if virsh pool-info vm-storage >/dev/null 2>&1; then
+    echo "[OK] Storage pool 'vm-storage' exists."
+    POOL_STATE=$(virsh pool-info vm-storage | awk '/State:/ {print $2}')
+    if [[ "${POOL_STATE}" != "running" ]]; then
+        echo "[*] Starting pool 'vm-storage'..."
+        virsh pool-start vm-storage
+    fi
+else
+    echo "[*] Defining libvirt storage pool 'vm-storage' target ${MOUNT_POINT}..."
+    virsh pool-define-as --name vm-storage --type dir --target "${MOUNT_POINT}"
+    virsh pool-build vm-storage 2>/dev/null || true
+    virsh pool-start vm-storage
+fi
+
+virsh pool-autostart vm-storage
+virsh pool-refresh vm-storage
+echo "[OK] Storage pool 'vm-storage' is active and set to autostart."
+
+# ==============================================================================
+# STEP 3: CONFIGURE LIBVIRT NETWORK (migration-lab)
+# ==============================================================================
+echo -e "\n>>> [3/4] Verifying libvirt Virtual Network 'migration-lab'..."
+
+# Ensure 'default' network is active (used by Vagrant management interface)
+if virsh net-info default >/dev/null 2>&1; then
+    DEF_STATE=$(virsh net-info default | awk '/Active:/ {print $2}')
+    if [[ "${DEF_STATE}" != "yes" ]]; then
+        virsh net-start default || true
+    fi
+    virsh net-autostart default || true
+fi
+
+NET_XML_TEMP="/tmp/migration-lab-net.xml"
+cat << 'EOF' > "${NET_XML_TEMP}"
+<network>
+  <name>migration-lab</name>
+  <forward mode='nat'/>
+  <bridge name='virbr10' stp='on' delay='0'/>
+  <ip address='10.10.10.1' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='10.10.10.100' end='10.10.10.200'/>
+      <host mac='52:54:00:10:10:10' name='dc01' ip='10.10.10.10'/>
+      <host mac='52:54:00:10:10:20' name='app01' ip='10.10.10.20'/>
+      <host mac='52:54:00:10:10:30' name='db01' ip='10.10.10.30'/>
+      <host mac='52:54:00:10:10:40' name='file01' ip='10.10.10.40'/>
+    </dhcp>
+  </ip>
+</network>
+EOF
+
+if virsh net-info migration-lab >/dev/null 2>&1; then
+    echo "[OK] Network 'migration-lab' already exists. Updating definition..."
+    virsh net-destroy migration-lab >/dev/null 2>&1 || true
+    virsh net-undefine migration-lab >/dev/null 2>&1 || true
+fi
+
+echo "[*] Defining libvirt network 'migration-lab' (10.10.10.0/24)..."
+virsh net-define "${NET_XML_TEMP}"
+virsh net-start migration-lab
+virsh net-autostart migration-lab
+rm -f "${NET_XML_TEMP}"
+
+echo "[OK] Network 'migration-lab' is active (Bridge: virbr10, Gateway: 10.10.10.1)."
+
+# ==============================================================================
+# STEP 4: VERIFY VAGRANT LIBVIRT PLUGIN & BOX
+# ==============================================================================
+echo -e "\n>>> [4/4] Verifying Vagrant and Bento Box..."
+if command -v vagrant >/dev/null 2>&1; then
+    echo "[OK] Vagrant $(vagrant --version) is available."
+    if vagrant plugin list 2>/dev/null | grep -q "vagrant-libvirt"; then
+        echo "[OK] vagrant-libvirt plugin is installed."
+    else
+        echo "[*] Installing vagrant-libvirt plugin..."
+        vagrant plugin install vagrant-libvirt
+    fi
+fi
+
+echo -e "\n=================================================================="
+echo "  Host Infrastructure Configuration Completed Successfully!       "
+echo "=================================================================="
+virsh pool-list --all
+echo ""
+virsh net-list --all
