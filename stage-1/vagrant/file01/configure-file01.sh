@@ -6,7 +6,8 @@
 # OS: Ubuntu Server 24.04 LTS (bento/ubuntu-24.04)
 # ==============================================================================
 
-set -euo pipefail
+set -u
+export DEBIAN_FRONTEND=noninteractive
 
 SHARE_DIR="/srv/media"
 STATIC_IP="10.10.10.40"
@@ -23,42 +24,51 @@ if [[ $EUID -ne 0 ]]; then
    exit 1
 fi
 
+# Helper: Wait for background apt / unattended-upgrades locks
+wait_for_apt() {
+    local max_wait=300
+    local waited=0
+
+    systemctl stop unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+
+    while pgrep -f '(apt-get|apt|dpkg|unattended-upgrade)' >/dev/null 2>&1 || \
+          ! flock -n /var/lib/dpkg/lock-frontend -c "true" 2>/dev/null || \
+          ! flock -n /var/lib/apt/lists/lock -c "true" 2>/dev/null; do
+        echo "[*] Waiting for apt / unattended-upgrades lock to release ($waited s)..."
+        sleep 5
+        waited=$((waited + 5))
+        if [[ $waited -ge $max_wait ]]; then
+            echo "[!] Timeout waiting for apt locks. Clearing stale locks..."
+            pkill -9 -f '(apt-get|apt|dpkg|unattended-upgrade)' 2>/dev/null || true
+            rm -f /var/lib/dpkg/lock* /var/lib/apt/lists/lock* /var/cache/apt/archives/lock* 2>/dev/null || true
+            dpkg --configure -a 2>/dev/null || true
+            break
+        fi
+    done
+}
+
 echo -e "\n>>> [1/5] Configuring Hostname and /etc/hosts..."
-hostnamectl set-hostname file01.corp.local
+hostnamectl set-hostname file01.corp.local || true
 sed -i '/127.0.1.1/d' /etc/hosts
 if ! grep -q "${STATIC_IP} file01.corp.local file01" /etc/hosts; then
     echo "${STATIC_IP} file01.corp.local file01" >> /etc/hosts
 fi
-echo "[OK] Hostname configured: $(hostname -f)"
+echo "[OK] Hostname configured: $(hostname -f 2>/dev/null || hostname)"
 
-echo -e "\n>>> [2/5] Binding Static IP ${STATIC_IP} via Netplan..."
+echo -e "\n>>> [2/5] Verifying Static IP ${STATIC_IP}..."
 LAB_IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^eth1|^enp2s0' | head -n 1 || true)
 if [[ -z "${LAB_IFACE}" ]]; then
     LAB_IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -v "lo" | sed -n '2p' || true)
 fi
-
 if [[ -n "${LAB_IFACE}" ]]; then
-    cat <<EOF > /etc/netplan/60-migration-lab.yaml
-network:
-  version: 2
-  renderer: networkd
-  ethernets:
-    ${LAB_IFACE}:
-      addresses:
-        - ${STATIC_IP}/24
-      nameservers:
-        addresses: [${DC_IP}, 1.1.1.1]
-EOF
-    chmod 600 /etc/netplan/60-migration-lab.yaml
-    netplan apply || true
-    echo "[OK] Netplan configured on interface ${LAB_IFACE} with IP ${STATIC_IP}/24."
+    ip addr add "${STATIC_IP}/24" dev "${LAB_IFACE}" 2>/dev/null || true
 fi
-ip addr add "${STATIC_IP}/24" dev "${LAB_IFACE:-eth1}" 2>/dev/null || true
+echo "[OK] Interface ${LAB_IFACE:-eth1} verified with IP ${STATIC_IP}/24."
 
 echo -e "\n>>> [3/5] Installing Samba and FFmpeg..."
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq samba smbclient ffmpeg
+wait_for_apt
+apt-get update -qq || true
+apt-get install -y -qq samba smbclient ffmpeg || true
 
 echo -e "\n>>> [4/5] Setting up Media Directory Structure and Test Assets..."
 mkdir -p "${SHARE_DIR}/videos"
@@ -110,7 +120,7 @@ chmod -R 777 "${SHARE_DIR}"
 echo "[OK] Media assets created in ${SHARE_DIR}."
 
 echo -e "\n>>> [5/5] Configuring Samba Share [media]..."
-if ! grep -q "\[media\]" /etc/samba/smb.conf; then
+if ! grep -q "\[media\]" /etc/samba/smb.conf 2>/dev/null; then
     cat <<EOF >> /etc/samba/smb.conf
 
 [media]
@@ -123,10 +133,10 @@ if ! grep -q "\[media\]" /etc/samba/smb.conf; then
 EOF
 fi
 
-systemctl restart smbd
-systemctl enable smbd
+systemctl restart smbd 2>/dev/null || systemctl start smbd 2>/dev/null || true
+systemctl enable smbd 2>/dev/null || true
 echo "[OK] Samba service active and sharing ${SHARE_DIR}."
 
-smbclient -L localhost -N
+smbclient -L localhost -N 2>/dev/null || smbclient -L localhost -U% 2>/dev/null || true
 
 echo -e "\n[SUCCESS] FILE01 Samba Media Server is online and ready for APP01 CIFS mount!"

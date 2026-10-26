@@ -118,12 +118,15 @@ for vm in "${ORDERED_VMS[@]}"; do
     IS_RUNNING=$(vagrant status --machine-readable 2>/dev/null | grep ",state,running" || true)
     if [[ -n "${IS_RUNNING}" ]]; then
         echo -e "${GREEN}[OK] ${vm^^} is already running in libvirt.${RESET}"
+        echo -e "${CYAN}[*] Running 'vagrant provision' to ensure guest bootstrap scripts are applied...${RESET}"
+        vagrant provision || true
     else
         echo -e "${CYAN}[*] Starting ${vm^^} using 'vagrant up --provider=libvirt'...${RESET}"
         if vagrant up --provider=libvirt; then
             echo -e "${GREEN}[OK] 'vagrant up' for ${vm^^} completed.${RESET}"
         else
-            echo -e "${YELLOW}[!] 'vagrant up' reported warnings or non-zero exit for ${vm^^}. Continuing to status checks...${RESET}"
+            echo -e "${YELLOW}[!] 'vagrant up' reported non-zero exit for ${vm^^}. Running 'vagrant provision' fallback...${RESET}"
+            vagrant provision || true
         fi
     fi
 

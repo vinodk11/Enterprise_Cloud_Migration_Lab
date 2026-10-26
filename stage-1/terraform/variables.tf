@@ -95,8 +95,9 @@ variable "admin_username" {
 
 variable "admin_password" {
   type        = string
-  description = "Administrator password for the Linux Host VM (HV01) (leave null to auto-generate)."
-  default     = null
+  description = "Administrator password for the Linux Host VM (HV01)."
+  default     = "LabAdmin2026!#"
   sensitive   = true
 }
+
 

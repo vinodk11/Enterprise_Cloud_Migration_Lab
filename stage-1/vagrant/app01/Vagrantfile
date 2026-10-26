@@ -51,7 +51,7 @@ network:
       addresses:
         - 10.10.10.20/24
       nameservers:
-        addresses: [10.10.10.10, 1.1.1.1]
+        addresses: [1.1.1.1, 10.10.10.10]
 EOF
     chmod 600 /etc/netplan/60-migration-lab.yaml
     netplan apply || true

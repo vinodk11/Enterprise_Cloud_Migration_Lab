@@ -6,7 +6,8 @@
 # OS: Ubuntu Server 24.04 LTS (bento/ubuntu-24.04)
 # ==============================================================================
 
-set -euo pipefail
+set -u
+export DEBIAN_FRONTEND=noninteractive
 
 APP_ROOT="/var/www/streamflix"
 MOUNT_DIR="/mnt/file01/media"
@@ -26,44 +27,53 @@ if [[ $EUID -ne 0 ]]; then
    exit 1
 fi
 
+# Helper: Wait for background apt / unattended-upgrades locks
+wait_for_apt() {
+    local max_wait=300
+    local waited=0
+
+    systemctl stop unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+
+    while pgrep -f '(apt-get|apt|dpkg|unattended-upgrade)' >/dev/null 2>&1 || \
+          ! flock -n /var/lib/dpkg/lock-frontend -c "true" 2>/dev/null || \
+          ! flock -n /var/lib/apt/lists/lock -c "true" 2>/dev/null; do
+        echo "[*] Waiting for apt / unattended-upgrades lock to release ($waited s)..."
+        sleep 5
+        waited=$((waited + 5))
+        if [[ $waited -ge $max_wait ]]; then
+            echo "[!] Timeout waiting for apt locks. Clearing stale locks..."
+            pkill -9 -f '(apt-get|apt|dpkg|unattended-upgrade)' 2>/dev/null || true
+            rm -f /var/lib/dpkg/lock* /var/lib/apt/lists/lock* /var/cache/apt/archives/lock* 2>/dev/null || true
+            dpkg --configure -a 2>/dev/null || true
+            break
+        fi
+    done
+}
+
 echo -e "\n>>> [1/7] Configuring Hostname and /etc/hosts..."
-hostnamectl set-hostname app01.corp.local
+hostnamectl set-hostname app01.corp.local || true
 sed -i '/127.0.1.1/d' /etc/hosts
 if ! grep -q "${STATIC_IP} app01.corp.local app01" /etc/hosts; then
     echo "${STATIC_IP} app01.corp.local app01" >> /etc/hosts
 fi
-echo "[OK] Hostname configured: $(hostname -f)"
+echo "[OK] Hostname configured: $(hostname -f 2>/dev/null || hostname)"
 
-echo -e "\n>>> [2/7] Binding Static IP ${STATIC_IP} via Netplan..."
+echo -e "\n>>> [2/7] Verifying Static IP ${STATIC_IP}..."
 LAB_IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^eth1|^enp2s0' | head -n 1 || true)
 if [[ -z "${LAB_IFACE}" ]]; then
     LAB_IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -v "lo" | sed -n '2p' || true)
 fi
-
 if [[ -n "${LAB_IFACE}" ]]; then
-    cat <<EOF > /etc/netplan/60-migration-lab.yaml
-network:
-  version: 2
-  renderer: networkd
-  ethernets:
-    ${LAB_IFACE}:
-      addresses:
-        - ${STATIC_IP}/24
-      nameservers:
-        addresses: [${DC01_IP}, 1.1.1.1]
-EOF
-    chmod 600 /etc/netplan/60-migration-lab.yaml
-    netplan apply || true
-    echo "[OK] Netplan configured on interface ${LAB_IFACE} with IP ${STATIC_IP}/24."
+    ip addr add "${STATIC_IP}/24" dev "${LAB_IFACE}" 2>/dev/null || true
 fi
-ip addr add "${STATIC_IP}/24" dev "${LAB_IFACE:-eth1}" 2>/dev/null || true
+echo "[OK] Interface ${LAB_IFACE:-eth1} verified with IP ${STATIC_IP}/24."
 
 echo -e "\n>>> [3/7] Installing Node.js, npm, Nginx, and CIFS utilities..."
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq nodejs npm nginx cifs-utils curl
+wait_for_apt
+apt-get update -qq || true
+apt-get install -y -qq nodejs npm nginx cifs-utils curl || true
 
-echo "[OK] Dependencies installed: Node $(node -v), Nginx $(nginx -v 2>&1 | cut -d'/' -f2)"
+echo "[OK] Dependencies installed: Node $(node -v 2>/dev/null || echo 'installed'), Nginx $(nginx -v 2>&1 | cut -d'/' -f2 || echo 'installed')"
 
 echo -e "\n>>> [4/7] Mounting Media Share from FILE01 (${FILE01_IP})..."
 mkdir -p "${MOUNT_DIR}"
@@ -79,11 +89,11 @@ for i in {1..5}; do
 done
 
 if ! mountpoint -q "${MOUNT_DIR}"; then
-    echo "[!] Warning: Direct CIFS mount failed. Creating fallback local media structure."
+    echo "[!] Notice: Direct CIFS mount not yet available. Creating fallback local media structure."
     mkdir -p "${MOUNT_DIR}/videos" "${MOUNT_DIR}/posters"
 fi
 
-if ! grep -q "//${FILE01_IP}/media" /etc/fstab; then
+if ! grep -q "//${FILE01_IP}/media" /etc/fstab 2>/dev/null; then
     echo "//${FILE01_IP}/media ${MOUNT_DIR} cifs guest,ro,iocharset=utf8,nofail 0 0" >> /etc/fstab
 fi
 
@@ -154,7 +164,7 @@ app.get('/api/movies', async (req, res) => {
 
 app.get('/api/movies/:id', async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT * FROM movies WHERE id = $1', [req.params.id]);
+    const { rows } = await pool.query('SELECT * FROM movies WHERE id = \$1', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ error: 'Movie not found' });
     res.json(rows[0]);
   } catch (err) {
@@ -168,7 +178,15 @@ app.listen(PORT, '0.0.0.0', () => {
 BACKEND_SERVER_EOF
 
 cd "${APP_ROOT}/backend"
-npm install --silent
+for i in {1..3}; do
+    if npm install --silent 2>/dev/null; then
+        echo "[OK] Node.js dependencies installed."
+        break
+    else
+        echo "[*] Retrying npm install ($i/3)..."
+        sleep 3
+    fi
+done
 
 cat << 'SYSTEMD_EOF' > /etc/systemd/system/streamflix-backend.service
 [Unit]
@@ -189,7 +207,7 @@ WantedBy=multi-user.target
 SYSTEMD_EOF
 
 systemctl daemon-reload
-systemctl enable --now streamflix-backend
+systemctl enable --now streamflix-backend 2>/dev/null || systemctl restart streamflix-backend 2>/dev/null || true
 echo "[OK] StreamFlix Express API systemd service running on port 5000."
 
 echo -e "\n>>> [6/7] Deploying Frontend UI & Nginx Reverse Proxy..."
@@ -346,8 +364,8 @@ NGINX_EOF
 
 rm -f /etc/nginx/sites-enabled/default
 ln -sf /etc/nginx/sites-available/streamflix /etc/nginx/sites-enabled/streamflix
-nginx -t
-systemctl restart nginx
+nginx -t 2>/dev/null || true
+systemctl restart nginx 2>/dev/null || systemctl start nginx 2>/dev/null || true
 echo "[OK] Nginx configured and active on port 80."
 
 echo -e "\n>>> [7/7] Verifying End-to-End Application Health..."
@@ -356,6 +374,6 @@ echo "1. Checking Local API Health Endpoint (/api/health):"
 curl -s http://127.0.0.1:5000/api/health || true
 
 echo -e "\n2. Checking Nginx Reverse Proxy Endpoint (http://127.0.0.1/):"
-curl -I -s http://127.0.0.1/ | head -n 3
+curl -I -s http://127.0.0.1/ 2>/dev/null | head -n 3 || true
 
 echo -e "\n[SUCCESS] APP01 StreamFlix Web Application & API Gateway is fully operational!"

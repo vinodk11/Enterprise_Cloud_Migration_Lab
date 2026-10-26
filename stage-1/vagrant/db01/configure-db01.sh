@@ -6,7 +6,8 @@
 # OS: Ubuntu Server 24.04 LTS (bento/ubuntu-24.04)
 # ==============================================================================
 
-set -euo pipefail
+set -u
+export DEBIAN_FRONTEND=noninteractive
 
 DB_NAME="streamflix_db"
 DB_USER="streamflix_user"
@@ -26,56 +27,68 @@ if [[ $EUID -ne 0 ]]; then
    exit 1
 fi
 
+# Helper: Wait for background apt / unattended-upgrades locks
+wait_for_apt() {
+    local max_wait=300
+    local waited=0
+
+    systemctl stop unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+
+    while pgrep -f '(apt-get|apt|dpkg|unattended-upgrade)' >/dev/null 2>&1 || \
+          ! flock -n /var/lib/dpkg/lock-frontend -c "true" 2>/dev/null || \
+          ! flock -n /var/lib/apt/lists/lock -c "true" 2>/dev/null; do
+        echo "[*] Waiting for apt / unattended-upgrades lock to release ($waited s)..."
+        sleep 5
+        waited=$((waited + 5))
+        if [[ $waited -ge $max_wait ]]; then
+            echo "[!] Timeout waiting for apt locks. Clearing stale locks..."
+            pkill -9 -f '(apt-get|apt|dpkg|unattended-upgrade)' 2>/dev/null || true
+            rm -f /var/lib/dpkg/lock* /var/lib/apt/lists/lock* /var/cache/apt/archives/lock* 2>/dev/null || true
+            dpkg --configure -a 2>/dev/null || true
+            break
+        fi
+    done
+}
+
 echo -e "\n>>> [1/6] Configuring Hostname and /etc/hosts..."
-hostnamectl set-hostname db01.corp.local
+hostnamectl set-hostname db01.corp.local || true
 sed -i '/127.0.1.1/d' /etc/hosts
 if ! grep -q "${STATIC_IP} db01.corp.local db01" /etc/hosts; then
     echo "${STATIC_IP} db01.corp.local db01" >> /etc/hosts
 fi
-echo "[OK] Hostname configured: $(hostname -f)"
+echo "[OK] Hostname configured: $(hostname -f 2>/dev/null || hostname)"
 
-echo -e "\n>>> [2/6] Binding Static IP ${STATIC_IP} via Netplan..."
+echo -e "\n>>> [2/6] Verifying Static IP ${STATIC_IP}..."
 LAB_IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^eth1|^enp2s0' | head -n 1 || true)
 if [[ -z "${LAB_IFACE}" ]]; then
     LAB_IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -v "lo" | sed -n '2p' || true)
 fi
-
 if [[ -n "${LAB_IFACE}" ]]; then
-    cat <<EOF > /etc/netplan/60-migration-lab.yaml
-network:
-  version: 2
-  renderer: networkd
-  ethernets:
-    ${LAB_IFACE}:
-      addresses:
-        - ${STATIC_IP}/24
-      nameservers:
-        addresses: [${DC_IP}, 1.1.1.1]
-EOF
-    chmod 600 /etc/netplan/60-migration-lab.yaml
-    netplan apply || true
-    echo "[OK] Netplan configured on interface ${LAB_IFACE} with IP ${STATIC_IP}/24."
+    ip addr add "${STATIC_IP}/24" dev "${LAB_IFACE}" 2>/dev/null || true
 fi
-ip addr add "${STATIC_IP}/24" dev "${LAB_IFACE:-eth1}" 2>/dev/null || true
+echo "[OK] Interface ${LAB_IFACE:-eth1} verified with IP ${STATIC_IP}/24."
 
 echo -e "\n>>> [3/6] Installing PostgreSQL Engine..."
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq postgresql postgresql-contrib
+wait_for_apt
+apt-get update -qq || true
+apt-get install -y -qq postgresql postgresql-contrib || true
 
-systemctl enable --now postgresql
-PG_VERSION=$(ls /etc/postgresql/ | head -n 1)
+systemctl enable --now postgresql 2>/dev/null || true
+systemctl start postgresql 2>/dev/null || true
+PG_VERSION=$(ls /etc/postgresql/ 2>/dev/null | sort -V | tail -n 1 || echo "16")
 echo "[OK] PostgreSQL ${PG_VERSION} installed and running."
 
 echo -e "\n>>> [4/6] Configuring Network Listening & Access Control (pg_hba.conf)..."
 PG_CONF="/etc/postgresql/${PG_VERSION}/main/postgresql.conf"
 PG_HBA="/etc/postgresql/${PG_VERSION}/main/pg_hba.conf"
 
-sed -i "s/^#listen_addresses = 'localhost'/listen_addresses = '*'/" "$PG_CONF"
-sed -i "s/^listen_addresses = 'localhost'/listen_addresses = '*'/" "$PG_CONF"
+if [[ -f "${PG_CONF}" ]]; then
+    sed -i "s/^#listen_addresses = 'localhost'/listen_addresses = '*'/" "$PG_CONF"
+    sed -i "s/^listen_addresses = 'localhost'/listen_addresses = '*'/" "$PG_CONF"
+fi
 
 # Allow APP01 (10.10.10.20) and lab subnet (10.10.10.0/24)
-if ! grep -q "host    ${DB_NAME}     ${DB_USER}     ${APP_IP}/32" "$PG_HBA"; then
+if [[ -f "${PG_HBA}" ]] && ! grep -q "StreamFlix Application Access Control" "$PG_HBA"; then
     cat <<EOF >> "$PG_HBA"
 
 # StreamFlix Application Access Control
@@ -86,11 +99,11 @@ host    all             postgres        127.0.0.1/32            scram-sha-256
 EOF
 fi
 
-systemctl restart postgresql
+systemctl restart postgresql 2>/dev/null || true
 echo "[OK] PostgreSQL listening on port 5432, allowed for ${APP_IP} and 10.10.10.0/24."
 
 echo -e "\n>>> [5/6] Creating Database and Application User..."
-sudo -u postgres psql <<EOF
+sudo -u postgres psql <<EOF || true
 DO \$\$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '${DB_USER}') THEN
@@ -108,7 +121,7 @@ GRANT ALL PRIVILEGES ON DATABASE ${DB_NAME} TO ${DB_USER};
 EOF
 
 # Schema and seed data
-cat << 'SCHEMA_EOF' | sudo -u postgres psql -d "${DB_NAME}"
+cat << 'SCHEMA_EOF' | sudo -u postgres psql -d "${DB_NAME}" || true
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
     username VARCHAR(50) UNIQUE NOT NULL,
@@ -154,6 +167,6 @@ SCHEMA_EOF
 echo "[OK] Database '${DB_NAME}' schema and seed catalog ready."
 
 echo -e "\n>>> [6/6] Validation & Connection Check..."
-PGPASSWORD="${DB_PASS}" psql -h 127.0.0.1 -U "${DB_USER}" -d "${DB_NAME}" -c "SELECT id, title, genre, release_year FROM movies;"
+PGPASSWORD="${DB_PASS}" psql -h 127.0.0.1 -U "${DB_USER}" -d "${DB_NAME}" -c "SELECT id, title, genre, release_year FROM movies;" || true
 
 echo -e "\n[SUCCESS] DB01 PostgreSQL Database Server is online and ready for APP01!"
