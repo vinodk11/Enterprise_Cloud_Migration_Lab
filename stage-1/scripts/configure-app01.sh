@@ -114,7 +114,7 @@ cat << 'BACKEND_EOF' > "${APP_ROOT}/backend/package.json"
 }
 BACKEND_EOF
 
-cat << BACKEND_SERVER_EOF > "${APP_ROOT}/backend/server.js"
+cat << 'BACKEND_SERVER_EOF' > "${APP_ROOT}/backend/server.js"
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
@@ -123,7 +123,7 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 const pool = new Pool({
-  host: process.env.DB_HOST || '${DB01_IP}',
+  host: process.env.DB_HOST || '10.10.10.30',
   port: parseInt(process.env.DB_PORT || '5432'),
   user: process.env.DB_USER || 'streamflix_user',
   password: process.env.DB_PASSWORD || 'StreamFlixPass2026!',
@@ -164,7 +164,7 @@ app.get('/api/movies', async (req, res) => {
 
 app.get('/api/movies/:id', async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT * FROM movies WHERE id = \$1', [req.params.id]);
+    const { rows } = await pool.query('SELECT * FROM movies WHERE id = $1', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ error: 'Movie not found' });
     res.json(rows[0]);
   } catch (err) {
@@ -173,7 +173,7 @@ app.get('/api/movies/:id', async (req, res) => {
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(\`[StreamFlix Backend] Running on port \${PORT} on APP01\`);
+  console.log(`[StreamFlix Backend] Running on port ${PORT} on APP01`);
 });
 BACKEND_SERVER_EOF
 

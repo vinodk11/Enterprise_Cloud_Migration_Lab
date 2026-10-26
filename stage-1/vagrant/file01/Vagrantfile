@@ -30,7 +30,7 @@ Vagrant.configure("2") do |config|
     if ! id -u labadmin >/dev/null 2>&1; then
       useradd -m -s /bin/bash labadmin
     fi
-    echo 'labadmin:LabAdmin2026!#' | chpasswd
+    echo 'labadmin:LabAdmin2026!#' | chpasswd || true
     usermod -aG sudo labadmin
     echo "labadmin ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/labadmin
     chmod 0440 /etc/sudoers.d/labadmin

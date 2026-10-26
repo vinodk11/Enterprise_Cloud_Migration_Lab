@@ -273,10 +273,13 @@ EOF
 
     # Configure NAT Port Forwarding for Port 80 to APP01 (10.10.10.20:80)
     sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
-    iptables -t nat -C PREROUTING -p tcp --dport 80 -j DNAT --to-destination 10.10.10.20:80 2>/dev/null || \
-      iptables -t nat -A PREROUTING -p tcp --dport 80 -j DNAT --to-destination 10.10.10.20:80 || true
-    iptables -C FORWARD -p tcp -d 10.10.10.20 --dport 80 -j ACCEPT 2>/dev/null || \
-      iptables -A FORWARD -p tcp -d 10.10.10.20 --dport 80 -j ACCEPT || true
+    iptables -t nat -D PREROUTING -p tcp --dport 80 -j DNAT --to-destination 10.10.10.20:80 2>/dev/null || true
+    iptables -t nat -C PREROUTING -i eth0 -p tcp --dport 80 -j DNAT --to-destination 10.10.10.20:80 2>/dev/null || \
+      iptables -t nat -A PREROUTING -i eth0 -p tcp --dport 80 -j DNAT --to-destination 10.10.10.20:80 || true
+    iptables -t nat -C POSTROUTING -d 10.10.10.20 -p tcp --dport 80 -j MASQUERADE 2>/dev/null || \
+      iptables -t nat -A POSTROUTING -d 10.10.10.20 -p tcp --dport 80 -j MASQUERADE || true
+    iptables -C FORWARD -d 10.10.10.20 -p tcp --dport 80 -j ACCEPT 2>/dev/null || \
+      iptables -I FORWARD 1 -d 10.10.10.20 -p tcp --dport 80 -j ACCEPT || true
 
     # ==============================================================================
     # STEP 7: PRE-DOWNLOAD BENTO/UBUNTU-24.04 VAGRANT BOX

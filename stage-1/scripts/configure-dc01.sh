@@ -107,7 +107,7 @@ samba-tool domain provision \
     --domain="${DOMAIN_NETBIOS}" \
     --server-role=dc \
     --dns-backend=SAMBA_INTERNAL \
-    --dns-forwarder="${DNS_FORWARDER}" \
+    --option="dns forwarder = ${DNS_FORWARDER}" \
     --adminpass="${DOMAIN_PASS}" || true
 
 echo "[OK] Samba AD Domain provisioned successfully."
