@@ -50,12 +50,16 @@ wait_for_apt() {
     done
 }
 
-echo -e "\n>>> [1/7] Configuring Hostname and /etc/hosts..."
+echo -e "\n>>> [1/7] Configuring Hostname and Fleet /etc/hosts..."
 hostnamectl set-hostname app01.corp.local || true
 sed -i '/127.0.1.1/d' /etc/hosts
-if ! grep -q "${STATIC_IP} app01.corp.local app01" /etc/hosts; then
-    echo "${STATIC_IP} app01.corp.local app01" >> /etc/hosts
-fi
+sed -i '/corp.local/d' /etc/hosts
+cat << 'HOSTS_EOF' >> /etc/hosts
+10.10.10.10 dc01.corp.local dc01
+10.10.10.20 app01.corp.local app01
+10.10.10.30 db01.corp.local db01
+10.10.10.40 file01.corp.local file01
+HOSTS_EOF
 echo "[OK] Hostname configured: $(hostname -f 2>/dev/null || hostname)"
 
 echo -e "\n>>> [2/7] Verifying Static IP ${STATIC_IP}..."
