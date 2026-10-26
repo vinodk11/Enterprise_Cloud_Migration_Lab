@@ -144,6 +144,19 @@ rm -f "${NET_XML_TEMP}"
 
 echo "[OK] Network 'migration-lab' is active (Bridge: virbr10, Gateway: 10.10.10.1)."
 
+# Configure local /etc/hosts on HV01 for direct guest VM name resolution
+sed -i '/corp.local/d' /etc/hosts
+sed -i '/10.10.10./d' /etc/hosts
+cat << 'HOSTS_EOF' >> /etc/hosts
+
+# Migration Lab Guest Fleet Static Resolution
+10.10.10.10 dc01.corp.local dc01
+10.10.10.20 app01.corp.local app01
+10.10.10.30 db01.corp.local db01
+10.10.10.40 file01.corp.local file01
+HOSTS_EOF
+echo "[OK] Fleet /etc/hosts resolution configured on HV01."
+
 # ==============================================================================
 # STEP 4: VERIFY VAGRANT LIBVIRT PLUGIN & BOX
 # ==============================================================================

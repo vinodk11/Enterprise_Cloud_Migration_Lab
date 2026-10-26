@@ -271,6 +271,19 @@ EOF
     rm -f "${NET_XML}"
     echo "[OK] Network 'migration-lab' (10.10.10.0/24) active on virbr10."
 
+    # Configure local /etc/hosts on HV01 for direct guest VM name resolution
+    sed -i '/corp.local/d' /etc/hosts
+    sed -i '/10.10.10./d' /etc/hosts
+    cat << 'HOSTS_EOF' >> /etc/hosts
+
+# Migration Lab Guest Fleet Static Resolution
+10.10.10.10 dc01.corp.local dc01
+10.10.10.20 app01.corp.local app01
+10.10.10.30 db01.corp.local db01
+10.10.10.40 file01.corp.local file01
+HOSTS_EOF
+    echo "[OK] Fleet /etc/hosts resolution configured on HV01."
+
     # Configure NAT Port Forwarding for Port 80 to APP01 (10.10.10.20:80)
     sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
     iptables -t nat -D PREROUTING -p tcp --dport 80 -j DNAT --to-destination 10.10.10.20:80 2>/dev/null || true
