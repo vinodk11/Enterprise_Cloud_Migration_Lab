@@ -64,10 +64,13 @@ jobs:
       - name: Terraform Validate
         run: terraform validate
 
+      # Plan runs for pull_requests, pushes, and manual plan/apply
       - name: Terraform Plan
+        if: github.event_name == 'pull_request' || (github.event_name == 'push') || (github.event_name == 'workflow_dispatch' && github.event.inputs.action != 'destroy')
         id: plan
         run: terraform plan -input=false -out=tfplan
 
+      # Apply runs on push to main or manual workflow_dispatch with action 'apply'
       - name: Terraform Apply
         if: (github.ref == 'refs/heads/main' && github.event_name == 'push') || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
         run: terraform apply -input=false tfplan
@@ -76,6 +79,7 @@ jobs:
         if: (github.ref == 'refs/heads/main' && github.event_name == 'push') || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
         run: terraform output
 
+      # Destroy runs ONLY when explicitly selected in manual workflow_dispatch
       - name: Terraform Destroy
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
         run: terraform destroy -auto-approve -input=false
