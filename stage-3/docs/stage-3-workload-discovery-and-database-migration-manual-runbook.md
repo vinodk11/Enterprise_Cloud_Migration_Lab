@@ -182,8 +182,11 @@ exit
 
 Now you will create the target managed database in AWS. The **DB Subnet Group** (`streamflix-target-db-subnet-group`) and **DB Security Group** (`streamflix-target-db-sg` / `sg-08f6e173df43c49d9`) were already deployed in Stage 2.
 
-### Step 2.1: Create RDS PostgreSQL Instance via AWS Management Console
+### Step 2.1: Create RDS PostgreSQL Instance
 
+You can provision the target database using either the **AWS Management Console (UI)** or the **AWS CLI**. Choose whichever method you prefer:
+
+#### Option A: Via AWS Management Console (Click-by-Click UI)
 1. In the AWS Management Console search bar at the top, type **RDS** and click **Amazon RDS**.
 2. In the left navigation menu, click **Databases**.
 3. Click the orange **Create database** button.
@@ -220,6 +223,27 @@ Now you will create the target managed database in AWS. The **DB Subnet Group** 
     * **Deletion protection**: Uncheck (allows easy deletion when lab is done).
 13. Click the orange **Create database** button at the bottom.
 
+#### Option B: Via AWS CLI Command
+Alternatively, run this single AWS CLI command to provision the exact same instance:
+```bash
+aws rds create-db-instance \
+  --db-instance-identifier streamflix-target-db \
+  --db-instance-class db.t4g.micro \
+  --engine postgres \
+  --engine-version 16.3 \
+  --master-username postgres \
+  --master-user-password "MasterAdminPass2026!" \
+  --allocated-storage 20 \
+  --storage-type gp3 \
+  --no-auto-minor-version-upgrade \
+  --no-publicly-accessible \
+  --db-subnet-group-name streamflix-target-db-subnet-group \
+  --vpc-security-group-ids sg-08f6e173df43c49d9 \
+  --db-name streamflix_db \
+  --backup-retention-period 0 \
+  --region us-east-1
+```
+
 *(Status will show `Creating` and transition to `Available` in ~5 to 8 minutes).*
 
 ---
@@ -255,8 +279,9 @@ PGPASSWORD='MasterAdminPass2026!' psql \
 
 Now we configure the AWS Database Migration Service (AWS DMS) components in the AWS Management Console.
 
-### Step 3.1: Create DMS Replication Subnet Group in UI Console
+### Step 3.1: Create DMS Replication Subnet Group
 
+#### Option A: Via AWS Management Console (Click-by-Click UI)
 1. In the AWS Management Console search bar at the top, type **DMS** and click **Database Migration Service**.
 2. In the left navigation menu, click **Subnet groups**.
 3. Click the orange **Create subnet group** button.
@@ -270,10 +295,22 @@ Now we configure the AWS Database Migration Service (AWS DMS) components in the 
      * `subnet-092b27e4a5bd71540` (`10.20.11.0/24` in `us-east-1b`)
 6. Click **Create subnet group**.
 
+#### Option B: Via AWS CLI Command
+```bash
+aws dms create-replication-subnet-group \
+  --replication-subnet-group-identifier streamflix-dms-subnet-group \
+  --replication-subnet-group-description "DMS Subnet Group in Private App Subnets" \
+  --subnet-ids subnet-0f94155d4f2a9ffda subnet-092b27e4a5bd71540 \
+  --region us-east-1
+```
+
 ---
 
-### Step 3.2: Create DMS Replication Instance in UI Console
+### Step 3.2: Create DMS Replication Instance
 
+You can provision the replication instance via the **Console** or **CLI**:
+
+#### Option A: Via AWS Management Console (Click-by-Click UI)
 1. In the DMS left navigation menu, click **Replication instances**.
 2. Click the orange **Create replication instance** button.
 3. **Replication instance configuration**:
@@ -291,6 +328,19 @@ Now we configure the AWS Database Migration Service (AWS DMS) components in the 
    * Remove the `default` security group if selected.
 5. Click **Create replication instance**.
 
+#### Option B: Via AWS CLI Command
+```bash
+aws dms create-replication-instance \
+  --replication-instance-identifier streamflix-dms-instance \
+  --replication-instance-class dms.t3.micro \
+  --allocated-storage 20 \
+  --replication-subnet-group-identifier streamflix-dms-subnet-group \
+  --vpc-security-group-ids sg-075c2521b1372d1a5 \
+  --no-publicly-accessible \
+  --no-multi-az \
+  --region us-east-1
+```
+
 > [!NOTE]
 > Creating the replication instance takes **5 to 8 minutes**. The status in the console will show `Creating` and change to **`Available`**. While it creates, you can proceed to create your endpoints in Step 3.3 and 3.4.
 
@@ -298,6 +348,7 @@ Now we configure the AWS Database Migration Service (AWS DMS) components in the 
 
 ### Step 3.3: Create Source Endpoint (Pointing to On-Prem DB01)
 
+#### Option A: Via AWS Management Console (Click-by-Click UI)
 1. In the DMS left navigation menu, click **Endpoints**.
 2. Click the orange **Create endpoint** button.
 3. **Endpoint type**: Select **Source endpoint**.
@@ -314,10 +365,26 @@ Now we configure the AWS Database Migration Service (AWS DMS) components in the 
    * **Secure Sockets Layer (SSL) mode**: Select **none** *(Traffic is already hardware-encrypted inside the IPsec VPN tunnel)*.
 6. Click the orange **Create endpoint** button at the bottom.
 
+#### Option B: Via AWS CLI Command
+```bash
+aws dms create-endpoint \
+  --endpoint-identifier dms-source-db01 \
+  --endpoint-type source \
+  --engine-name postgres \
+  --server-name 10.10.10.30 \
+  --port 5432 \
+  --database-name streamflix_db \
+  --username streamflix_user \
+  --password 'StreamFlixPass2026!' \
+  --ssl-mode none \
+  --region us-east-1
+```
+
 ---
 
 ### Step 3.4: Create Target Endpoint (Pointing to AWS RDS)
 
+#### Option A: Via AWS Management Console (Click-by-Click UI)
 1. In the DMS left navigation menu, click **Endpoints**.
 2. Click the orange **Create endpoint** button.
 3. **Endpoint type**: Select **Target endpoint**.
@@ -335,12 +402,28 @@ Now we configure the AWS Database Migration Service (AWS DMS) components in the 
      * **Secure Sockets Layer (SSL) mode**: Select **require**.
 5. Click the orange **Create endpoint** button at the bottom.
 
+#### Option B: Via AWS CLI Command
+```bash
+aws dms create-endpoint \
+  --endpoint-identifier dms-target-rds \
+  --endpoint-type target \
+  --engine-name postgres \
+  --server-name "$RDS_ENDPOINT" \
+  --port 5432 \
+  --database-name streamflix_db \
+  --username postgres \
+  --password 'MasterAdminPass2026!' \
+  --ssl-mode require \
+  --region us-east-1
+```
+
 ---
 
 ### Step 3.5: Test Cross-Cloud Connectivity on Both Endpoints
 
 Once your replication instance `streamflix-dms-instance` status shows **`Available`**:
 
+#### Option A: Via AWS Management Console (Click-by-Click UI)
 1. In the DMS left navigation menu, click **Endpoints**.
 2. Select **`dms-source-db01`** $\to$ In the **Actions** dropdown menu at the top right, click **Test connection**.
    * Replication instance: Select `streamflix-dms-instance`.
@@ -351,14 +434,30 @@ Once your replication instance `streamflix-dms-instance` status shows **`Availab
    * Click **Run test**.
    * Status will change to **`Testing`** and then turn green: **`successful`**!
 
+#### Option B: Via AWS CLI Command
+```bash
+# Retrieve ARNs
+REP_ARN=$(aws dms describe-replication-instances --filters "Name=replication-instance-id,Values=streamflix-dms-instance" --query 'ReplicationInstances[0].ReplicationInstanceArn' --output text --region us-east-1)
+SRC_ARN=$(aws dms describe-endpoints --filters "Name=endpoint-id,Values=dms-source-db01" --query 'Endpoints[0].EndpointArn' --output text --region us-east-1)
+TGT_ARN=$(aws dms describe-endpoints --filters "Name=endpoint-id,Values=dms-target-rds" --query 'Endpoints[0].EndpointArn' --output text --region us-east-1)
+
+# Trigger tests
+aws dms test-connection --replication-instance-arn "$REP_ARN" --endpoint-arn "$SRC_ARN" --region us-east-1
+aws dms test-connection --replication-instance-arn "$REP_ARN" --endpoint-arn "$TGT_ARN" --region us-east-1
+
+# Check results
+aws dms describe-connections --query 'Connections[*].{Endpoint:EndpointIdentifier,Status:Status}' --output table --region us-east-1
+```
+
 ---
 
 ## 5. Phase 4: Create & Run the Full Load + CDC Migration Task (UI Console)
 
 Now we create the replication task that performs the initial copy and enables real-time Change Data Capture.
 
-### Step 4.1: Create the Task via AWS Management Console
+### Step 4.1: Create the Task
 
+#### Option A: Via AWS Management Console (Click-by-Click UI)
 1. In the DMS left navigation menu, click **Database migration tasks**.
 2. Click the orange **Create task** button.
 3. **Task configuration**:
@@ -381,6 +480,41 @@ Now we create the replication task that performs the initial copy and enables re
 6. **Migration task startup configuration**:
    * Select **Automatically on create**.
 7. Click the orange **Create task** button at the bottom.
+
+#### Option B: Via AWS CLI Command
+```bash
+# 1. Create table mapping JSON
+cat << 'EOF' > /tmp/table-mappings.json
+{
+  "rules": [
+    {
+      "rule-type": "selection",
+      "rule-id": "1",
+      "rule-name": "1",
+      "object-locator": {
+        "schema-name": "public",
+        "table-name": "%"
+      },
+      "rule-action": "include"
+    }
+  ]
+}
+EOF
+
+# 2. Create and start task
+aws dms create-replication-task \
+  --replication-task-identifier dms-task-streamflix-cdc \
+  --source-endpoint-arn "$SRC_ARN" \
+  --target-endpoint-arn "$TGT_ARN" \
+  --replication-instance-arn "$REP_ARN" \
+  --migration-type full-load-and-cdc \
+  --table-mappings file:///tmp/table-mappings.json \
+  --replication-task-settings '{"TargetMetadata":{"TargetSchema":"","SupportLobs":true,"FullLobMode":false,"LobChunkSize":0,"LimitedSizeLobMode":true,"LobMaxSize":32}}' \
+  --region us-east-1
+
+TASK_ARN=$(aws dms describe-replication-tasks --filters "Name=replication-task-id,Values=dms-task-streamflix-cdc" --query 'ReplicationTasks[0].ReplicationTaskArn' --output text --region us-east-1)
+aws dms start-replication-task --replication-task-arn "$TASK_ARN" --start-replication-task-type start-replication --region us-east-1
+```
 
 ---
 
