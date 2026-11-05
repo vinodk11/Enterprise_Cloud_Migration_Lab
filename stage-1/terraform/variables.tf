@@ -51,6 +51,12 @@ variable "tags" {
   }
 }
 
+variable "enable_bastion" {
+  type        = bool
+  description = "Controls whether Azure Bastion host is provisioned. Defaults to false to avoid ~$140/mo costs in favor of direct SSH."
+  default     = false
+}
+
 variable "bastion_subnet_prefix" {
   type        = list(string)
   description = "Address prefix CIDR block for AzureBastionSubnet."

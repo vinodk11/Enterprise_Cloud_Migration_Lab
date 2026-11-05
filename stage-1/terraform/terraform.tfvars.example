@@ -9,6 +9,7 @@ vnet_address_space       = ["10.10.0.0/16"]
 management_subnet_name   = "snet-management"
 management_subnet_prefix = ["10.10.1.0/24"]
 nsg_name                 = "nsg-onprem-lab"
+enable_bastion           = false
 
 tags = {
   Environment = "OnPrem-Simulation"

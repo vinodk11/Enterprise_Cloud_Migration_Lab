@@ -50,12 +50,12 @@ output "nsg_id" {
 
 output "bastion_host_name" {
   description = "Name of the Azure Bastion host."
-  value       = azurerm_bastion_host.onprem_bastion.name
+  value       = var.enable_bastion ? azurerm_bastion_host.onprem_bastion[0].name : "Disabled (Port 22 SSH enabled)"
 }
 
 output "bastion_public_ip" {
   description = "Public IP address allocated to the Azure Bastion host."
-  value       = azurerm_public_ip.bastion_pip.ip_address
+  value       = var.enable_bastion ? azurerm_public_ip.bastion_pip[0].ip_address : "Disabled (Port 22 SSH enabled)"
 }
 
 output "hv01_vm_id" {
