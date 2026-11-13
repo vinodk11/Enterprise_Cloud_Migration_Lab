@@ -359,15 +359,21 @@ Now verify that video files and posters stream smoothly through CloudFront.
 From your workstation terminal:
 
 ```bash
+# IMPORTANT: Provide only the raw domain name (DO NOT include https://)
 CF_DOMAIN="<YOUR_CLOUDFRONT_DOMAIN>"
 
 # 1. Test Poster SVG download
 curl -I https://$CF_DOMAIN/posters/migration.svg
 ```
+
+> [!IMPORTANT]
+> When assigning `CF_DOMAIN`, omit the `https://` protocol prefix (e.g., use `d2mq4y5w2vj2m3.cloudfront.net`, NOT `https://d2mq4y5w2vj2m3.cloudfront.net`). If `https://` is included in the variable, running `https://$CF_DOMAIN/...` results in `https://https://...` and fails with `curl: (6) Could not resolve host: https`.
+
 **Expected Output:**
 ```text
 HTTP/2 200 
 content-type: image/svg+xml
+etag: "5f85ff579ed59ab14905ae574cd3efe9"
 x-cache: Hit from cloudfront (or Miss from cloudfront)
 ```
 
@@ -387,9 +393,12 @@ curl -i \
 ```text
 HTTP/2 206 Partial Content
 content-type: video/mp4
-content-range: bytes 0-1023/231424
+content-range: bytes 0-1023/230692
 content-length: 1024
+etag: "11c6266a8ec93605f975972112158514"
+server: AmazonS3
 x-cache: Miss from cloudfront
+via: 1.1 ... CloudFront
 ```
 *HTTP/2 206 Partial Content confirms video streaming scrub-seeking is fully functional!*
 
@@ -413,14 +422,28 @@ HTTP/1.1 403 Forbidden
 
 Now reconfigure StreamFlix to serve all movie posters and video streaming streams from CloudFront instead of the local SMB mount.
 
-### Step 6.1: Update Application Environment on APP01
+### Step 6.1a: Grant Table-Level Permissions on Target Amazon RDS
+When AWS DMS performs the Initial Full Load, it creates the database tables under the master user `postgres`. In PostgreSQL, privileges granted on a database do not cascade to newly created tables. The application user `streamflix_user` requires explicit grants on schema `public` tables and sequences.
+
+From `DB01` (or any host with RDS network access):
+```bash
+PGPASSWORD='MasterAdminPass2026!' psql \
+  -h "<YOUR_RDS_ENDPOINT>" \
+  -U postgres \
+  -d streamflix_db \
+  -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO streamflix_user; GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO streamflix_user; ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO streamflix_user;"
+```
+
+---
+
+### Step 6.1b: Update Application Environment on APP01
 SSH into **`APP01`**:
 
 ```bash
 ssh -i /home/labadmin/Enterprise_Cloud_Migration_Lab/stage-1/vagrant/app01/.vagrant/machines/default/libvirt/private_key vagrant@10.10.10.20
 ```
 
-Edit `/var/www/streamflix/backend/.env`:
+Update `/var/www/streamflix/backend/.env`:
 ```bash
 cat << EOF | sudo tee /var/www/streamflix/backend/.env
 PORT=5000
@@ -432,9 +455,117 @@ DB_PASSWORD=StreamFlixPass2026!
 MEDIA_BASE_URL=https://<YOUR_CLOUDFRONT_DOMAIN>
 EOF
 ```
+*(Ensure there are no leading spaces after `=` in the variable assignments)*.
 
-Restart the StreamFlix application service:
+---
+
+### Step 6.1c: Update Backend Code (`server.js`) with Dynamic URL Enrichment & RDS SSL
+Amazon RDS PostgreSQL enforces SSL connections over VPN. Furthermore, `server.js` dynamically prefixes `MEDIA_BASE_URL` to create `poster_url` and `video_url` for CloudFront delivery:
+
 ```bash
+cat << 'SERVER_EOF' | sudo tee /var/www/streamflix/backend/server.js
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const { Pool } = require('pg');
+
+const app = express();
+const PORT = process.env.PORT || 5000;
+
+// Enable SSL encryption automatically when connecting to Amazon RDS
+const isRds = process.env.DB_HOST && !process.env.DB_HOST.includes('10.10.10.30') && !process.env.DB_HOST.includes('localhost');
+
+const pool = new Pool({
+  host: process.env.DB_HOST || '10.10.10.30',
+  port: parseInt(process.env.DB_PORT || '5432'),
+  user: process.env.DB_USER || 'streamflix_user',
+  password: process.env.DB_PASSWORD || 'StreamFlixPass2026!',
+  database: process.env.DB_NAME || 'streamflix_db',
+  ssl: isRds ? { rejectUnauthorized: false } : false
+});
+
+app.use(cors());
+app.use(express.json());
+
+const getMediaBaseUrl = () => (process.env.MEDIA_BASE_URL || '').trim().replace(/\/$/, '');
+
+function formatMovie(movie) {
+  const mediaBase = getMediaBaseUrl();
+  const posterRel = movie.poster_path ? movie.poster_path.replace(/^\/media/, '') : '';
+  const videoRel = movie.video_path ? movie.video_path.replace(/^\/media/, '') : '';
+
+  const posterUrl = mediaBase ? `${mediaBase}${posterRel}` : movie.poster_path;
+  const videoUrl = mediaBase ? `${mediaBase}${videoRel}` : movie.video_path;
+
+  return {
+    ...movie,
+    poster_path: posterUrl,
+    video_path: videoUrl,
+    poster_url: posterUrl,
+    video_url: videoUrl
+  };
+}
+
+app.get('/api/health', async (req, res) => {
+  try {
+    const dbCheck = await pool.query('SELECT 1 AS alive');
+    res.json({
+      status: 'UP',
+      service: 'StreamFlix API',
+      host: 'APP01',
+      database: dbCheck.rows[0].alive === 1 ? 'CONNECTED' : 'DISCONNECTED',
+      db_target: process.env.DB_HOST ? 'AWS RDS (' + process.env.DB_HOST + ')' : 'On-Premises (10.10.10.30)',
+      media_base_url: getMediaBaseUrl() || 'local (/media)',
+      timestamp: new Date().toISOString()
+    });
+  } catch (err) {
+    res.status(503).json({
+      status: 'DEGRADED',
+      service: 'StreamFlix API',
+      error: err.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+app.get('/api/movies', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM movies ORDER BY id ASC');
+    res.json(rows.map(formatMovie));
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to retrieve movie catalog', details: err.message });
+  }
+});
+
+app.get('/api/movies/:id', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM movies WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Movie not found' });
+    res.json(formatMovie(rows[0]));
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to retrieve movie details', details: err.message });
+  }
+});
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`[StreamFlix Backend] Running on port ${PORT} on APP01`);
+});
+SERVER_EOF
+```
+
+---
+
+### Step 6.1d: Configure Systemd Environment Loading & Restart Service
+Ensure systemd imports `/var/www/streamflix/backend/.env` upon startup:
+
+```bash
+# Add EnvironmentFile directive if not present
+if ! grep -q "EnvironmentFile" /etc/systemd/system/streamflix-backend.service; then
+  sudo sed -i "/\[Service\]/a EnvironmentFile=-/var/www/streamflix/backend/.env" /etc/systemd/system/streamflix-backend.service
+fi
+
+# Reload systemd and restart service
+sudo systemctl daemon-reload
 sudo systemctl restart streamflix-backend
 sudo systemctl status streamflix-backend --no-pager
 ```
@@ -442,23 +573,85 @@ sudo systemctl status streamflix-backend --no-pager
 ---
 
 ### Step 6.2: Validate End-to-End Media Delivery
-Query the movie catalog API:
 
-```bash
-curl -s http://localhost/api/movies | jq .
-```
+1. **Verify Health Endpoint**:
+   ```bash
+   curl -s http://localhost/api/health | jq .
+   ```
+   **Expected Output:**
+   ```json
+   {
+     "status": "UP",
+     "service": "StreamFlix API",
+     "host": "APP01",
+     "database": "CONNECTED",
+     "db_target": "AWS RDS (streamflix-target-db.cy9mak0su1oj.us-east-1.rds.amazonaws.com)",
+     "media_base_url": "https://<YOUR_CLOUDFRONT_DOMAIN>",
+     "timestamp": "2026-11-13T17:03:09.521Z"
+   }
+   ```
 
-Verify that the application serves movies with media URLs resolving to CloudFront:
-```json
-[
-  {
-    "id": 1,
-    "title": "Inception",
-    "poster_url": "https://d123456abcdef8.cloudfront.net/posters/migration.svg",
-    "video_url": "https://d123456abcdef8.cloudfront.net/videos/migration.mp4"
-  }
-]
-```
+2. **Verify Movie Catalog API**:
+   ```bash
+   curl -s http://localhost/api/movies | jq .
+   ```
+   **Expected Output:**
+   ```json
+   [
+     {
+       "id": 1,
+       "title": "Cloud Migration Chronicles",
+       "description": "An epic documentary following legacy monolith migration to cloud infrastructure.",
+       "release_year": 2026,
+       "genre": "Documentary",
+       "duration_minutes": 85,
+       "poster_path": "https://<YOUR_CLOUDFRONT_DOMAIN>/posters/migration.svg",
+       "video_path": "https://<YOUR_CLOUDFRONT_DOMAIN>/videos/migration.mp4",
+       "created_at": "2026-11-13T10:18:34.345Z",
+       "poster_url": "https://<YOUR_CLOUDFRONT_DOMAIN>/posters/migration.svg",
+       "video_url": "https://<YOUR_CLOUDFRONT_DOMAIN>/videos/migration.mp4"
+     },
+     {
+       "id": 2,
+       "title": "KVM Virtualization Horizons",
+       "description": "A deep dive into Linux Kernel-based Virtual Machine architecture and libvirt.",
+       "release_year": 2025,
+       "genre": "Sci-Fi",
+       "duration_minutes": 110,
+       "poster_path": "https://<YOUR_CLOUDFRONT_DOMAIN>/posters/hyperv.svg",
+       "video_path": "https://<YOUR_CLOUDFRONT_DOMAIN>/videos/hyperv.mp4",
+       "created_at": "2026-11-13T10:18:34.345Z",
+       "poster_url": "https://<YOUR_CLOUDFRONT_DOMAIN>/posters/hyperv.svg",
+       "video_url": "https://<YOUR_CLOUDFRONT_DOMAIN>/videos/hyperv.mp4"
+     },
+     {
+       "id": 3,
+       "title": "Samba in the Datacenter",
+       "description": "Building resilient Active Directory domains on Linux platforms.",
+       "release_year": 2024,
+       "genre": "Tech Drama",
+       "duration_minutes": 95,
+       "poster_path": "https://<YOUR_CLOUDFRONT_DOMAIN>/posters/samba.svg",
+       "video_path": "https://<YOUR_CLOUDFRONT_DOMAIN>/videos/samba.mp4",
+       "created_at": "2026-11-13T10:18:34.345Z",
+       "poster_url": "https://<YOUR_CLOUDFRONT_DOMAIN>/posters/samba.svg",
+       "video_url": "https://<YOUR_CLOUDFRONT_DOMAIN>/videos/samba.mp4"
+     },
+     {
+       "id": 4,
+       "title": "The Matrix Resurrections",
+       "description": "Return to a world of two realities: one, everyday life; the other, what lies behind it.",
+       "release_year": 2021,
+       "genre": "Sci-Fi",
+       "duration_minutes": 148,
+       "poster_path": "https://<YOUR_CLOUDFRONT_DOMAIN>/posters/matrix.svg",
+       "video_path": "https://<YOUR_CLOUDFRONT_DOMAIN>/videos/matrix.mp4",
+       "created_at": "2026-11-13T14:57:52.599Z",
+       "poster_url": "https://<YOUR_CLOUDFRONT_DOMAIN>/posters/matrix.svg",
+       "video_url": "https://<YOUR_CLOUDFRONT_DOMAIN>/videos/matrix.mp4"
+     }
+   ]
+   ```
 
 Exit `APP01`:
 ```bash
@@ -504,3 +697,111 @@ If CloudFront or S3 testing requires temporary rollback:
    curl -s http://localhost/api/movies
    ```
    *The application will immediately resume serving assets from `/mnt/file01/media`.*
+
+---
+
+## 10. Troubleshooting & Root Cause Analysis (RCA) Guide
+
+This section documents real-world production incidents, exact root causes, and resolutions encountered during Stage 4 execution.
+
+```
++----------------------------------------------------------------------------------------------------+
+| STAGE 4 ROOT CAUSE ANALYSIS & ERROR RESOLUTION MATRIX                                               |
++----------------------------------------------------------------------------------------------------+
+| Phase / Step | Error Message / Symptom             | Root Cause              | Resolution          |
++--------------+-------------------------------------+-------------------------+---------------------+
+| Phase 5      | curl: (6) Could not resolve host:   | Accidental duplicate    | Omit https:// from  |
+| Step 5.2     | https                               | https:// in variable    | CF_DOMAIN variable  |
++--------------+-------------------------------------+-------------------------+---------------------+
+| Phase 6      | no pg_hba.conf entry ...            | AWS RDS PostgreSQL      | Enable SSL in       |
+| Step 6.1c    | no encryption                       | enforces SSL over VPN   | node pg Pool config |
++--------------+-------------------------------------+-------------------------+---------------------+
+| Phase 6      | permission denied for table         | AWS DMS created tables  | Grant ALL on ALL    |
+| Step 6.1a    | movies (code 42501)                 | as postgres master user | TABLES to app user  |
++--------------+-------------------------------------+-------------------------+---------------------+
+| Phase 6      | curl /api/movies still outputs      | Missing systemd env     | Add EnvironmentFile |
+| Step 6.1d    | /media/posters/... (no CloudFront)  | loading & URL mapping   | & formatMovie map   |
++--------------+-------------------------------------+-------------------------+---------------------+
+| Phase 6      | Unit streamflix.service             | Service named           | Symlink streamflix  |
+| Step 6.1d    | could not be found                  | streamflix-backend      | to backend unit     |
++----------------------------------------------------------------------------------------------------+
+```
+
+---
+
+### Incident 1: `curl: (6) Could not resolve host: https`
+
+* **Location**: Phase 5, Step 5.2 (CloudFront Range Requests).
+* **Symptom**:
+  ```text
+  curl: (6) Could not resolve host: https
+  ```
+* **Root Cause**: The variable was defined with `CF_DOMAIN="https://d2mq4y5w2vj2m3.cloudfront.net"`. When executed as `curl https://$CF_DOMAIN/...`, the resulting URL expanded to `https://https://d2mq4y5w2vj2m3.cloudfront.net/...`. Curl interpreted the first `https` as the destination hostname.
+* **Resolution**: Define `CF_DOMAIN="d2mq4y5w2vj2m3.cloudfront.net"` containing strictly the Fully Qualified Domain Name (FQDN) without protocol scheme.
+
+---
+
+### Incident 2: `no pg_hba.conf entry for host "...", user "streamflix_user", no encryption`
+
+* **Location**: Phase 6, Step 6.1c (Application Cutover to Amazon RDS).
+* **Symptom**:
+  ```json
+  {"status":"DEGRADED","service":"StreamFlix API","error":"no pg_hba.conf entry for host \"10.10.1.10\", user \"streamflix_user\", database \"streamflix_db\", no encryption"}
+  ```
+* **Root Cause**: Amazon RDS PostgreSQL parameter groups enforce SSL encryption for remote connections traversing the VPN tunnel (`10.10.0.0/16`). Node.js `pg.Pool` defaults to unencrypted plaintext connections.
+* **Resolution**: In `server.js`, configure `ssl: { rejectUnauthorized: false }` whenever connecting to Amazon RDS:
+  ```javascript
+  const isRds = process.env.DB_HOST && !process.env.DB_HOST.includes('10.10.10.30') && !process.env.DB_HOST.includes('localhost');
+  const pool = new Pool({
+    // ...
+    ssl: isRds ? { rejectUnauthorized: false } : false
+  });
+  ```
+
+---
+
+### Incident 3: `ERROR 42501: permission denied for table movies`
+
+* **Location**: Phase 6, Step 6.1a (PostgreSQL Table Privileges).
+* **Symptom**:
+  ```text
+  error: permission denied for table movies (code 42501, routine: aclcheck_error)
+  ```
+* **Root Cause**: When AWS DMS executes the Full Load migration task, it authenticates as master user `postgres` and creates the target schema tables. In PostgreSQL, database-level grants (`GRANT ALL PRIVILEGES ON DATABASE ...`) do not cascade to existing or newly created tables in schema `public`.
+* **Resolution**: Connect to RDS as master user `postgres` and explicitly grant schema and table permissions:
+  ```sql
+  GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO streamflix_user;
+  GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO streamflix_user;
+  ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO streamflix_user;
+  ```
+
+---
+
+### Incident 4: `curl -s http://localhost/api/movies` Still Returning Local `/media/posters/...` Paths
+
+* **Location**: Phase 6, Step 6.1b/c/d (Media Retargeting).
+* **Symptom**:
+  Running `curl -s http://localhost/api/movies | jq .` continued to output `/media/posters/migration.svg` even after setting `MEDIA_BASE_URL` in `/var/www/streamflix/backend/.env`.
+* **Root Cause**:
+  1. The systemd service unit `/etc/systemd/system/streamflix-backend.service` was missing `EnvironmentFile=-/var/www/streamflix/backend/.env`. Therefore, systemd never passed `.env` variables into `process.env`.
+  2. `server.js` was outputting raw SQL rows (`res.json(rows)`) without prefixing `MEDIA_BASE_URL`.
+* **Resolution**:
+  1. Add `EnvironmentFile=-/var/www/streamflix/backend/.env` under `[Service]` in the systemd unit.
+  2. In `server.js`, dynamically map each movie to prepend `MEDIA_BASE_URL`, populating both `poster_url` and `video_url`.
+
+---
+
+### Incident 5: `Unit streamflix.service could not be found`
+
+* **Location**: Phase 6, Step 6.1d (Service Management).
+* **Symptom**:
+  ```text
+  Failed to restart streamflix.service: Unit streamflix.service could not be found.
+  ```
+* **Root Cause**: The provisioning script named the service `streamflix-backend.service`.
+* **Resolution**: Create an alias symlink on `APP01`:
+  ```bash
+  sudo ln -sf /etc/systemd/system/streamflix-backend.service /etc/systemd/system/streamflix.service
+  sudo systemctl daemon-reload
+  ```
+
