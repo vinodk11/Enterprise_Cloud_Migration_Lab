@@ -1,9 +1,10 @@
 # Stage 3: Enterprise Database Migration Manual Runbook — Method B (AWS DMS with Zero-Downtime CDC)
-**Document ID**: RUNBOOK-STAGE3-METHOD-B-DMS-CDC-20261104  
+**Document ID**: RUNBOOK-STAGE3-METHOD-B-DMS-CDC-20261113-V2  
 **Target Audience**: Cloud Migration Engineers, Database Architects, DevSecOps  
 **Lab Context**: Enterprise Cloud Migration Lab (StreamFlix Application Stack)  
 **Strategy**: Method B — Full Load + Ongoing Change Data Capture (CDC) via AWS DMS  
-**UI Focus**: Complete Click-by-Click AWS Management Console & Terminal Instructions  
+**UI Focus**: Dual AWS Management Console (Click-by-Click UI) & AWS CLI / Terminal Automation  
+**Hardened Version**: Fully incorporates all lessons learned, missed steps, and RCA resolutions from `REF-STAGE2-STAGE3-TROUBLESHOOTING-20261105`.
 
 ---
 
@@ -11,39 +12,39 @@
 
 In this enterprise migration pattern, you will migrate PostgreSQL 16 from the on-premises database server (`DB01` on Azure) to managed **Amazon RDS PostgreSQL** using **AWS Database Migration Service (AWS DMS)** with **Change Data Capture (CDC)**.
 
-The source database and application **remain 100% online** while AWS DMS migrates existing data and continuously streams live transactions (`INSERT`, `UPDATE`, `DELETE`) across the encrypted IPsec VPN bridge. When ready, cutover takes less than **60 seconds**.
+The source database and application **remain 100% online** while AWS DMS migrates existing data and continuously streams live transactions (`INSERT`, `UPDATE`, `DELETE`) across the encrypted IPsec VPN bridge. When ready, application cutover takes less than **60 seconds**.
 
 ```
 +--------------------------------------------------------------------------------------------------------------------------+
 | ON-PREMISES DATACENTER (AZURE)                             | TARGET MIGRATION LANDING ZONE (AWS)                         |
-| HV01 Edge Host: 20.29.104.127                              | Region: us-east-1                                           |
-| Host Internal: 10.10.1.10                                  | Target VPC: vpc-020d6b01e57048985 (10.20.0.0/16)            |
+| HV01 Edge Host: 20.118.39.120 (formerly 135.119.80.55)    | Region: us-east-1                                           |
+| Host Internal: 10.10.1.10                                  | Target VPC: 10.20.0.0/16                                    |
 | Guest Network: 10.10.10.0/24 (virbr10)                     |                                                             |
 |                                                            |                                                             |
 | +--------------------------------------------------------+ | +---------------------------------------------------------+ |
 | | Source Application & Database VMs:                     | | | Target AWS Landing Zone Subnets:                        | |
 | |                                                        | | |                                                         | |
-| |  [APP01 - Web/App Tier] (10.10.10.20)                 | | |  [App Tier Private Subnets]                             | |
-| |   * Nginx Reverse Proxy (Port 80)                      | | |   * subnet-0f94155d4f2a9ffda (10.20.10.0/24 - 1a)       | |
-| |   * Node.js / Express API (Port 5000)                  | | |   * subnet-092b27e4a5bd71540 (10.20.11.0/24 - 1b)       | |
+| |  [APP01 - Web/App Tier] (10.10.10.20)                  | | |  [App Tier Private Subnets]                             | |
+| |   * Nginx Reverse Proxy (Port 80)                      | | |   * 10.20.10.0/24 (us-east-1a)                          | |
+| |   * Node.js / Express API (Port 5000)                  | | |   * 10.20.11.0/24 (us-east-1b)                          | |
 | |           |                                            | | |                                                         | |
 | |           | Live Queries (TCP 5432)                    | | |   [AWS DMS Replication Instance]                        | |
 | |           v                                            | | |    * Identifier: streamflix-dms-instance                | |
 | |  [DB01 - Database Tier] (10.10.10.30)                  | | |    * Class: dms.t3.micro (Private VPC only)             | |
 | |   * PostgreSQL 16 (streamflix_db)                      | | |    * Security Group: streamflix-target-app-sg           | |
 | |   * WAL Level: LOGICAL (CDC Enabled)                   | | |                   |                                     | |
-| |   * Replication Slots / Senders                        | | |                   | Reads source & writes target        | |
-| +--------------------------------------------------------+ | |                   v                                     | |
-|          |                                                 | |  [Database Isolated Subnets] (No Internet)              | |
-|          | Live CDC Stream (TCP 5432)                      | |   * subnet-0c560d86fb2bcc381 (10.20.20.0/24 - 1a)       | |
-|          v                                                 | |   * subnet-0bf0d776e63b027e4 (10.20.21.0/24 - 1b)       | |
-|   [StrongSwan IPsec Daemon]                                | |                   |                                     | |
-|      (on HV01 Host)                                        | |                   v                                     | |
-|          |                                                 | |   [Target Amazon RDS PostgreSQL 16]                     | |
-|          |                                                 | |    * Engine: PostgreSQL 16.x                            | |
-|          |                                                 | |    * Class : db.t4g.micro / db.t3.micro                 | |
+| |   * Replication Slots & Superuser Role                 | | |                   | Reads source & writes target        | |
+| |   * Static Route: 10.20.0.0/16 via 10.10.10.1 (eth1)   | | |                   v                                     | |
+| +--------------------------------------------------------+ | |  [Database Isolated Subnets] (No Internet)              | |
+|          |                                                 | |   * 10.20.20.0/24 (us-east-1a)                          | |
+|          | Live CDC Stream (TCP 5432)                      | |   * 10.20.21.0/24 (us-east-1b)                          | |
+|          v                                                 | |                   |                                     | |
+|   [KVM virbr10 Forwarding & NAT Bypass]                    | |                   v                                     | |
+|   [StrongSwan IPsec Daemon (ESP DH-14)]                    | |   [Target Amazon RDS PostgreSQL 16]                     | |
+|      (on HV01 Host)                                        | |    * Engine: PostgreSQL 16.x                            | |
 |          |                                                 | |    * Subnet Group: streamflix-target-db-subnet-group    | |
 |          |                                                 | |    * Security Group: streamflix-target-db-sg            | |
+|          |                                                 | |    * SSL Mode: Enforced (hostssl)                       | |
 |          +=================================================+ | +---------------------------------------------------------+ |
 |                      Encrypted IPsec Tunnel Over WAN         |                   ^                                         |
 |                      Route: 10.10.0.0/16 <-> 10.20.0.0/16    +-------------------+                                         |
@@ -53,48 +54,109 @@ The source database and application **remain 100% online** while AWS DMS migrate
 
 ---
 
-### Parameter Reference Table
+### Master Credentials & Parameter Matrix
 
-| Component | Parameter | Value | Description |
-| :--- | :--- | :--- | :--- |
-| **On-Prem Edge** | HV01 Public IP | `20.29.104.127` | Edge IP / SSH Gateway |
-| **Source DB VM** | `DB01` IP | `10.10.10.30` | Source PostgreSQL 16 Server |
-| **Source DB** | Database Name | `streamflix_db` | Application production database |
-| **Source DB** | Replication User | `streamflix_user` | User configured with `REPLICATION` privilege |
-| **Source DB** | Password | `StreamFlixPass2026!` | Application / Replication password |
-| **AWS Target VPC** | Target VPC ID | `vpc-020d6b01e57048985` | Landing Zone Target VPC (`10.20.0.0/16`) |
-| **Target DB Subnets** | Subnet IDs | `subnet-0c560d86fb2bcc381` / `subnet-0bf0d776e63b027e4` | Isolated DB Subnets in 1a & 1b |
-| **Target DB Subnet Group** | Name | `streamflix-target-db-subnet-group` | RDS Subnet Group |
-| **Target DB Security Group** | ID | `sg-08f6e173df43c49d9` | Name: `streamflix-target-db-sg` |
-| **Target RDS DB** | DB Identifier | `streamflix-target-db` | Name of RDS instance |
-| **Target RDS DB** | Engine & Version | PostgreSQL 16.x | Compatible with source version |
-| **Target RDS DB** | Master User / Pass | `postgres` / `MasterAdminPass2026!` | RDS superuser credentials |
-| **DMS Subnet Group** | Name | `streamflix-dms-subnet-group` | Uses App Private Subnets (`10.20.10.0/24`, `10.20.11.0/24`) |
-| **DMS Security Group** | ID | `sg-075c2521b1372d1a5` | Name: `streamflix-target-app-sg` |
-| **DMS Instance** | Identifier / Class | `streamflix-dms-instance` / `dms.t3.micro` | 20 GiB gp3 storage |
-| **DMS Source Endpoint** | Identifier | `dms-source-db01` | Points to `10.10.10.30:5432` |
-| **DMS Target Endpoint** | Identifier | `dms-target-rds` | Points to RDS Endpoint `:5432` |
-| **DMS Task** | Task Identifier | `dms-task-streamflix-cdc` | Full Load + Ongoing Replication (CDC) |
+To avoid authentication and authorization errors, strictly reference this credential matrix:
+
+| Context | Host / Destination | Username | Password | Privileges / Role | Purpose |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Target RDS Master** | RDS Endpoint | `postgres` | `MasterAdminPass2026!` | `rds_superuser` | RDS administrative setup & master verification |
+| **Target RDS App User** | RDS Endpoint | `streamflix_user` | `StreamFlixPass2026!` | `LOGIN`, database owner | StreamFlix app target after cutover |
+| **Source DB CDC User** | `10.10.10.30` | `streamflix_user` | `StreamFlixPass2026!` | `SUPERUSER`, `REPLICATION` | DMS CDC replication & DDL event triggers |
+| **Source DB Local Root** | `10.10.10.30` | `postgres` | *(OS peer / `sudo`)* | `SUPERUSER` | Source local administration via `sudo -u postgres` |
+| **Hypervisor Host** | `HV01` Public IP | `azureuser` / `labadmin` | `AzureUser2026!#` / `LabAdmin2026!#` | `sudo`, `libvirt`, `kvm` | Direct SSH hypervisor administration |
 
 ---
 
-## 2. Phase 1: Source Workload & WAL Preparation on DB01
+## 2. Phase 0: Pre-Flight Cross-Cloud Network & Firewall Checklist
 
-To enable AWS DMS to capture ongoing changes in real time (**Change Data Capture / CDC**), PostgreSQL must be configured for **logical replication**.
+> [!IMPORTANT]
+> **Why this phase is mandatory**: During previous migrations, source endpoint tests and CDC tasks failed due to missing KVM bridge forward rules, missing Diffie-Hellman Phase 2 proposals in StrongSwan, and missing AWS VPC static routes. Completing this checklist guarantees zero connectivity failures.
 
-### Step 1.1: Connect to DB01
-From your workstation or HV01 terminal:
+### Step 0.1: Hypervisor (`HV01`) Firewall & Bridge Forwarding
+By default, KVM `libvirt` installs a `-o virbr10 -j REJECT` firewall rule that drops all incoming connections from the AWS VPN to `DB01`. Additionally, default NAT masquerade changes the source IP, breaking return routing.
+
+SSH into **`HV01`** and run the pre-flight network script:
 
 ```bash
-# Connect to DB01
+# SSH into HV01
+ssh azureuser@<HV01_PUBLIC_IP>
+```
+
+Execute on `HV01`:
+```bash
+# 1. Enable Linux kernel IP forwarding
+sudo sysctl -w net.ipv4.ip_forward=1
+echo "net.ipv4.ip_forward = 1" | sudo tee -a /etc/sysctl.d/99-ipforward.conf
+
+# 2. Allow incoming traffic from AWS VPC (10.20.0.0/16) into KVM bridge virbr10
+sudo iptables -I FORWARD 1 -d 10.10.10.0/24 -o virbr10 -j ACCEPT
+
+# 3. Allow return traffic from virbr10 back to AWS VPC
+sudo iptables -I FORWARD 1 -s 10.10.10.0/24 -i virbr10 -j ACCEPT
+
+# 4. Bypass NAT masquerade so original DB01 IP (10.10.10.30) is preserved across the VPN
+sudo iptables -t nat -I POSTROUTING 1 -s 10.10.10.0/24 -d 10.20.0.0/16 -j ACCEPT
+```
+
+---
+
+### Step 0.2: StrongSwan ESP Phase 2 Proposal on `HV01`
+AWS Site-to-Site VPN enforces Diffie-Hellman Perfect Forward Secrecy on Phase 2 (ESP). If DH Group 14 (`modp2048`) is missing, Phase 1 establishes but Phase 2 fails with `NO_PROPOSAL_CHOSEN notify, no CHILD_SA built`.
+
+Verify `/etc/ipsec.conf` on `HV01`:
+```bash
+sudo grep "esp=" /etc/ipsec.conf
+```
+Ensure the `esp` line includes `aes256-sha256-modp2048`:
+```ini
+esp=aes256gcm16-sha256,aes256-sha256-modp2048,aes256-sha256,aes128-sha1-modp1024,aes128-sha1!
+```
+If updating, restart StrongSwan:
+```bash
+sudo systemctl restart strongswan-starter
+sudo ipsec statusall | grep "INSTALLED"
+```
+*Expected: Output shows `aws-tunnel-1{1}: INSTALLED, TUNNEL, reqid 1, ESP in UDP`.*
+
+---
+
+### Step 0.3: AWS VPC Route Table Static Routes
+AWS DMS replication instances live in the private application subnets (`10.20.10.0/24`, `10.20.11.0/24`). The associated route tables must route `10.10.0.0/16` traffic to the Virtual Private Gateway (`vgw`).
+
+Verify or add via AWS CLI:
+```bash
+# Add route to App Private Route Table
+aws ec2 create-route \
+  --route-table-id <APP_PRIVATE_ROUTE_TABLE_ID> \
+  --destination-cidr-block 10.10.0.0/16 \
+  --gateway-id <VGW_ID> 2>/dev/null || true
+
+# Add route to DB Isolated Route Table
+aws ec2 create-route \
+  --route-table-id <DB_ISOLATED_ROUTE_TABLE_ID> \
+  --destination-cidr-block 10.10.0.0/16 \
+  --gateway-id <VGW_ID> 2>/dev/null || true
+```
+
+---
+
+## 3. Phase 1: Source Database Hardening on DB01
+
+To enable AWS DMS to stream live transactions via Change Data Capture (CDC), PostgreSQL must be properly bound to the network, configured for logical replication, authenticated with SCRAM-SHA-256, granted superuser rights for DDL triggers, and equipped with a return static route.
+
+### Step 1.1: Connect to DB01
+From `HV01`:
+
+```bash
+# Connect to DB01 using Vagrant SSH key or password
 ssh -i /home/labadmin/Enterprise_Cloud_Migration_Lab/stage-1/vagrant/db01/.vagrant/machines/default/libvirt/private_key vagrant@10.10.10.30
+# Or: ssh vagrant@10.10.10.30 (password: vagrant)
 ```
 
 ---
 
 ### Step 1.2: Record Baseline Data & Row Counts
-Check the current database contents:
-
 ```bash
 sudo -u postgres psql -d streamflix_db -c "SELECT count(*) FROM movies;"
 sudo -u postgres psql -d streamflix_db -c "SELECT id, title, release_year FROM movies ORDER BY id;"
@@ -103,72 +165,102 @@ sudo -u postgres psql -d streamflix_db -c "SELECT id, title, release_year FROM m
 
 ---
 
-### Step 1.3: Enable Logical Replication in `postgresql.conf`
-For DMS to capture changes, PostgreSQL's Write-Ahead Log level must be set to `logical`:
+### Step 1.3: Enable External Network Binding & Logical Replication in `postgresql.conf`
 
+> [!CAUTION]
+> **Root Cause Fix**: By default, Ubuntu binds PostgreSQL only to `localhost` (`127.0.0.1:5432`), rejecting all incoming connections from AWS DMS on `10.10.10.30`. Both `listen_addresses = '*'` and `wal_level = logical` are required.
+
+Run on `DB01`:
 ```bash
-# 1. Edit postgresql.conf
-sudo nano /etc/postgresql/16/main/postgresql.conf
-```
+# 1. Bind PostgreSQL to listen on all interfaces
+sudo sed -i "s/#listen_addresses = 'localhost'/listen_addresses = '*'/" /etc/postgresql/16/main/postgresql.conf
+sudo sed -i "s/listen_addresses = 'localhost'/listen_addresses = '*'/" /etc/postgresql/16/main/postgresql.conf
 
-Find or append these settings at the bottom of the file:
-```ini
+# 2. Append logical replication and CDC worker parameters
+sudo tee -a /etc/postgresql/16/main/postgresql.conf << 'EOF'
+# AWS DMS CDC Logical Replication Configuration
 wal_level = logical
 max_replication_slots = 5
 max_wal_senders = 5
+EOF
 ```
-*Save and exit (`Ctrl+O`, `Enter`, `Ctrl+X`).*
 
 ---
 
-### Step 1.4: Allow AWS Subnets in `pg_hba.conf`
-Configure PostgreSQL client authentication to allow the AWS DMS replication instance (`10.20.0.0/16`) to connect for standard queries and replication:
+### Step 1.4: Configure Client Authentication in `pg_hba.conf` using `scram-sha-256`
 
+> [!CAUTION]
+> **Root Cause Fix**: PostgreSQL 16 stores user password hashes using `SCRAM-SHA-256`. If `pg_hba.conf` specifies `md5`, PostgreSQL cannot verify the password against the SCRAM hash, resulting in:
+> `FATAL: password authentication failed for user "streamflix_user"`.
+> You **must** specify `scram-sha-256`.
+
+Run on `DB01`:
 ```bash
-# 1. Open pg_hba.conf
-sudo nano /etc/postgresql/16/main/pg_hba.conf
-```
+sudo tee -a /etc/postgresql/16/main/pg_hba.conf << 'EOF'
 
-Add these lines at the end of the file:
-```text
 # Allow AWS Target VPC (including DMS) to access streamflix_db and replication streams
-host    streamflix_db    streamflix_user    10.20.0.0/16    md5
-host    replication      streamflix_user    10.20.0.0/16    md5
-host    streamflix_db    postgres           10.20.0.0/16    md5
-host    replication      postgres           10.20.0.0/16    md5
+host    all             all             10.20.0.0/16            scram-sha-256
+host    replication     all             10.20.0.0/16            scram-sha-256
+EOF
 ```
-*Save and exit (`Ctrl+O`, `Enter`, `Ctrl+X`).*
 
 ---
 
-### Step 1.5: Grant Replication Permissions to `streamflix_user`
-In PostgreSQL, only users with the `REPLICATION` role can stream the Write-Ahead Log:
+### Step 1.5: Grant SUPERUSER and Replication Privileges to `streamflix_user`
 
+> [!CAUTION]
+> **Root Cause Fix**: AWS DMS CDC captures Data Definition Language (DDL) changes (`CREATE TABLE`, `ALTER TABLE`) by creating a PostgreSQL event trigger: `CREATE EVENT TRIGGER awsdms_intercept_ddl`. PostgreSQL strictly enforces that **only superusers can create event triggers**. Without `SUPERUSER`, the task crashes on startup with:
+> `Stream Component Fatal error (ddl_create_db_artifact failed)`.
+
+Run on `DB01`:
 ```bash
+sudo -u postgres psql -c "ALTER USER streamflix_user WITH SUPERUSER;"
 sudo -u postgres psql -c "ALTER USER streamflix_user WITH REPLICATION;"
+sudo -u postgres psql -c "ALTER USER streamflix_user WITH PASSWORD 'StreamFlixPass2026!';"
 sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO streamflix_user;"
 ```
 
 ---
 
-### Step 1.6: Restart PostgreSQL & Verify Settings
-Restart the service to activate `wal_level = logical`:
+### Step 1.6: Add Permanent Static Outbound Route on `DB01`
 
+> [!CAUTION]
+> **Root Cause Fix**: `DB01` is a multi-homed VM (`eth0`: Vagrant management NAT `192.168.121.x`; `eth1`: Lab network `10.10.10.30`). When querying Amazon RDS directly (`10.20.21.8`), `DB01` routes outbound packets via default route on `eth0` (`192.168.121.1`) instead of `eth1`, causing connections to time out. Adding this static route directs AWS traffic across `virbr10`.
+
+Run on `DB01`:
+```bash
+sudo ip route add 10.20.0.0/16 via 10.10.10.1 dev eth1 2>/dev/null || sudo ip route replace 10.20.0.0/16 via 10.10.10.1 dev eth1
+```
+
+---
+
+### Step 1.7: Restart PostgreSQL & Perform 4-Point Health Check
+Restart the database service:
 ```bash
 sudo systemctl restart postgresql
 ```
 
-Verify that the logical WAL settings are active:
+Execute the verification commands:
 ```bash
+# Check 1: Port 5432 bound to * (not 127.0.0.1)
+sudo ss -tulpn | grep 5432
+
+# Check 2: WAL level is logical
 sudo -u postgres psql -c "SHOW wal_level;"
-sudo -u postgres psql -c "SHOW max_replication_slots;"
+
+# Check 3: User roles show Superuser and Replication
+sudo -u postgres psql -c "\du streamflix_user"
+
+# Check 4: Outbound route to AWS VPC is eth1
+ip route get 10.20.21.8
 ```
-**Expected Output:**
+
+**Expected Check Output:**
 ```text
- wal_level 
------------
- logical
-(1 row)
+tcp   LISTEN 0      244          0.0.0.0:5432       0.0.0.0:*
+wal_level: logical
+Role name: streamflix_user | Attributes: Superuser, Replication
+10.20.21.8 via 10.10.10.1 dev eth1 src 10.10.10.30
 ```
 
 Exit `DB01`:
@@ -178,53 +270,36 @@ exit
 
 ---
 
-## 3. Phase 2: Provision Target AWS RDS PostgreSQL (UI Console)
-
-Now you will create the target managed database in AWS. The **DB Subnet Group** (`streamflix-target-db-subnet-group`) and **DB Security Group** (`streamflix-target-db-sg` / `sg-08f6e173df43c49d9`) were already deployed in Stage 2.
+## 4. Phase 2: Provision Target Amazon RDS PostgreSQL
 
 ### Step 2.1: Create RDS PostgreSQL Instance
 
-You can provision the target database using either the **AWS Management Console (UI)** or the **AWS CLI**. Choose whichever method you prefer:
-
 #### Option A: Via AWS Management Console (Click-by-Click UI)
-1. In the AWS Management Console search bar at the top, type **RDS** and click **Amazon RDS**.
-2. In the left navigation menu, click **Databases**.
-3. Click the orange **Create database** button.
-4. **Choose a database creation method**:
-   * Select **Standard create**.
-5. **Engine options**:
-   * Engine type: Select **PostgreSQL**.
-   * Engine Version: Select **PostgreSQL 16.3-R1** (or latest 16.x).
-6. **Templates**:
-   * Select **Free tier** (or **Dev/Test**).
-7. **Settings**:
-   * **DB instance identifier**: Enter `streamflix-target-db`.
-   * **Master username**: Enter `postgres`.
-   * **Master password**: Enter `MasterAdminPass2026!`.
-   * **Confirm master password**: Enter `MasterAdminPass2026!`.
-8. **Instance configuration**:
-   * DB instance class: Select **Burstable classes (includes t classes)** $\to$ Select `db.t4g.micro` (or `db.t3.micro`).
-9. **Storage**:
-   * Storage type: **General Purpose SSD (gp3)**.
-   * Allocated storage: `20` GiB.
-   * Storage autoscaling: **Uncheck** *"Enable storage autoscaling"* (keeps costs fixed).
-10. **Connectivity**:
-    * Virtual private cloud (VPC): Select `streamflix-target-vpc` (`vpc-020d6b01e57048985`).
-    * DB Subnet Group: Select `streamflix-target-db-subnet-group`.
-    * Public access: Select **No** *(Strict private isolation; only reachable over VPN!)*.
-    * VPC security group (firewall): Select **Choose existing**.
-      * Existing VPC security groups: Select `streamflix-target-db-sg` (`sg-08f6e173df43c49d9`).
-      * Click the **X** to remove the `default` security group if it is listed.
-11. **Database authentication**:
-    * Select **Password authentication**.
-12. **Additional configuration** *(Click the arrow to expand)*:
-    * **Initial database name**: Enter `streamflix_db`.
-    * **Backup retention period**: Select `0 days` (disables automated snapshots for quick lab teardown).
-    * **Deletion protection**: Uncheck (allows easy deletion when lab is done).
-13. Click the orange **Create database** button at the bottom.
+1. In the AWS Console search bar, type **RDS** and click **Amazon RDS**.
+2. Click **Databases** $\to$ click the orange **Create database** button.
+3. **Database creation method**: Select **Standard create**.
+4. **Engine options**: Select **PostgreSQL** $\to$ Version **PostgreSQL 16.3-R1** (or latest 16.x).
+5. **Templates**: Select **Free tier** (or **Dev/Test**).
+6. **Settings**:
+   - **DB instance identifier**: `streamflix-target-db`
+   - **Master username**: `postgres`
+   - **Master password**: `MasterAdminPass2026!`
+   - **Confirm master password**: `MasterAdminPass2026!`
+7. **Instance configuration**: Select `db.t4g.micro` or `db.t3.micro`.
+8. **Storage**: Select **gp3**, `20` GiB, **Uncheck** *"Enable storage autoscaling"*.
+9. **Connectivity**:
+   - **Virtual private cloud (VPC)**: Select `streamflix-target-vpc` (`10.20.0.0/16`).
+   - **DB Subnet Group**: Select `streamflix-target-db-subnet-group`.
+   - **Public access**: **No** *(Private only)*.
+   - **VPC security group**: Select **Choose existing** $\to$ select `streamflix-target-db-sg`. Remove `default` SG if present.
+10. **Database authentication**: Select **Password authentication**.
+11. **Additional configuration** *(expand)*:
+    - **Initial database name**: `streamflix_db`
+    - **Backup retention period**: `0 days`
+    - **Deletion protection**: Uncheck.
+12. Click **Create database**.
 
 #### Option B: Via AWS CLI Command
-Alternatively, run this single AWS CLI command to provision the exact same instance:
 ```bash
 aws rds create-db-instance \
   --db-instance-identifier streamflix-target-db \
@@ -244,30 +319,32 @@ aws rds create-db-instance \
   --region us-east-1
 ```
 
-*(Status will show `Creating` and transition to `Available` in ~5 to 8 minutes).*
-
 ---
 
-### Step 2.2: Retrieve the RDS Endpoint Address in the Console
-1. In the RDS Console $\to$ Click **Databases** $\to$ Click on **`streamflix-target-db`**.
-2. Under the **Connectivity & security** tab, look at **Endpoint & port**.
-3. Copy the **Endpoint** address:
-   *(It will look like `streamflix-target-db.cxxxxxxx.us-east-1.rds.amazonaws.com`)*.
+### Step 2.2: Retrieve RDS Endpoint
+Wait for status to become **`Available`** (~5-8 mins), then retrieve endpoint:
+```bash
+RDS_ENDPOINT=$(aws rds describe-db-instances \
+  --db-instance-identifier streamflix-target-db \
+  --query 'DBInstances[0].Endpoint.Address' \
+  --output text --region us-east-1)
+echo "Target RDS Endpoint: $RDS_ENDPOINT"
+```
 
 ---
 
 ### Step 2.3: Create Target Application Role on RDS
-From `HV01` (or your workstation over VPN), connect to the new RDS instance and create the `streamflix_user` role:
+From `HV01` (or `DB01` using the static route), connect to RDS using the **master password** and create the application role:
 
 ```bash
 PGPASSWORD='MasterAdminPass2026!' psql \
-  -h "<YOUR_RDS_ENDPOINT>" \
+  -h "$RDS_ENDPOINT" \
   -U postgres \
   -d streamflix_db \
   -c "CREATE ROLE streamflix_user WITH LOGIN PASSWORD 'StreamFlixPass2026!';"
 
 PGPASSWORD='MasterAdminPass2026!' psql \
-  -h "<YOUR_RDS_ENDPOINT>" \
+  -h "$RDS_ENDPOINT" \
   -U postgres \
   -d streamflix_db \
   -c "GRANT ALL PRIVILEGES ON DATABASE streamflix_db TO streamflix_user;"
@@ -275,27 +352,19 @@ PGPASSWORD='MasterAdminPass2026!' psql \
 
 ---
 
-## 4. Phase 3: Deploy & Configure AWS DMS (UI Console)
-
-Now we configure the AWS Database Migration Service (AWS DMS) components in the AWS Management Console.
+## 5. Phase 3: Deploy & Configure AWS DMS (Zero-Failure Execution)
 
 ### Step 3.1: Create DMS Replication Subnet Group
 
-#### Option A: Via AWS Management Console (Click-by-Click UI)
-1. In the AWS Management Console search bar at the top, type **DMS** and click **Database Migration Service**.
-2. In the left navigation menu, click **Subnet groups**.
-3. Click the orange **Create subnet group** button.
-4. Fill in the fields:
-   * **Name**: Enter `streamflix-dms-subnet-group`.
-   * **Description**: Enter `DMS Subnet Group in Private App Subnets`.
-   * **VPC**: Select `streamflix-target-vpc` (`vpc-020d6b01e57048985`).
-5. In the **Add subnets** section:
-   * Check the boxes for the two private application subnets:
-     * `subnet-0f94155d4f2a9ffda` (`10.20.10.0/24` in `us-east-1a`)
-     * `subnet-092b27e4a5bd71540` (`10.20.11.0/24` in `us-east-1b`)
+#### Option A: Via AWS Console (UI)
+1. In the AWS Console search bar, type **DMS** $\to$ click **Database Migration Service**.
+2. Click **Subnet groups** $\to$ click **Create subnet group**.
+3. **Name**: `streamflix-dms-subnet-group`.
+4. **VPC**: Select `streamflix-target-vpc`.
+5. **Add subnets**: Select the two App Private Subnets (`10.20.10.0/24` in `1a` and `10.20.11.0/24` in `1b`).
 6. Click **Create subnet group**.
 
-#### Option B: Via AWS CLI Command
+#### Option B: Via AWS CLI
 ```bash
 aws dms create-replication-subnet-group \
   --replication-subnet-group-identifier streamflix-dms-subnet-group \
@@ -308,27 +377,19 @@ aws dms create-replication-subnet-group \
 
 ### Step 3.2: Create DMS Replication Instance
 
-You can provision the replication instance via the **Console** or **CLI**:
+#### Option A: Via AWS Console (UI)
+1. Click **Replication instances** $\to$ click **Create replication instance**.
+2. **Name**: `streamflix-dms-instance`.
+3. **Instance class**: `dms.t3.micro`.
+4. **Allocated storage**: `20` GiB.
+5. **VPC**: Select `streamflix-target-vpc`.
+6. **Replication subnet group**: `streamflix-dms-subnet-group`.
+7. **Publicly accessible**: **Uncheck this box** *(Strictly private)*.
+8. **Advanced network configuration**:
+   - **VPC security group**: Select `streamflix-target-app-sg`. Remove `default`.
+9. Click **Create replication instance**.
 
-#### Option A: Via AWS Management Console (Click-by-Click UI)
-1. In the DMS left navigation menu, click **Replication instances**.
-2. Click the orange **Create replication instance** button.
-3. **Replication instance configuration**:
-   * **Name**: Enter `streamflix-dms-instance`.
-   * **Descriptive Amazon Resource Name (ARN)**: Leave blank (optional).
-   * **Instance class**: Select `dms.t3.micro`.
-   * **Engine version**: Leave default recommended.
-   * **Allocated storage (GiB)**: Enter `20`.
-   * **VPC**: Select `streamflix-target-vpc` (`vpc-020d6b01e57048985`).
-   * **Replication subnet group**: Select `streamflix-dms-subnet-group`.
-   * **Multi-AZ**: Select **Single-AZ** (or uncheck Multi-AZ).
-   * **Publicly accessible**: **Uncheck this box** *(It must be private!)*.
-4. **Advanced security and network configuration** *(Click arrow to expand)*:
-   * **VPC security group(s)**: Select `streamflix-target-app-sg` (`sg-075c2521b1372d1a5`).
-   * Remove the `default` security group if selected.
-5. Click **Create replication instance**.
-
-#### Option B: Via AWS CLI Command
+#### Option B: Via AWS CLI
 ```bash
 aws dms create-replication-instance \
   --replication-instance-identifier streamflix-dms-instance \
@@ -341,31 +402,25 @@ aws dms create-replication-instance \
   --region us-east-1
 ```
 
-> [!NOTE]
-> Creating the replication instance takes **5 to 8 minutes**. The status in the console will show `Creating` and change to **`Available`**. While it creates, you can proceed to create your endpoints in Step 3.3 and 3.4.
-
 ---
 
-### Step 3.3: Create Source Endpoint (Pointing to On-Prem DB01)
+### Step 3.3: Create Source Endpoint (`dms-source-db01`)
 
-#### Option A: Via AWS Management Console (Click-by-Click UI)
-1. In the DMS left navigation menu, click **Endpoints**.
-2. Click the orange **Create endpoint** button.
-3. **Endpoint type**: Select **Source endpoint**.
-4. **Select RDS DB instance**: Leave **unchecked**.
-5. **Endpoint configuration**:
-   * **Endpoint identifier**: Enter `dms-source-db01`.
-   * **Source engine**: Select **PostgreSQL**.
-   * **Access to endpoint database**: Select **Provide access information manually**.
-   * **Server name**: Enter `10.10.10.30` *(Private IP of DB01 on Azure!)*.
-   * **Port**: Enter `5432`.
-   * **User name**: Enter `streamflix_user`.
-   * **Password**: Enter `StreamFlixPass2026!`.
-   * **Database name**: Enter `streamflix_db`.
-   * **Secure Sockets Layer (SSL) mode**: Select **none** *(Traffic is already hardware-encrypted inside the IPsec VPN tunnel)*.
-6. Click the orange **Create endpoint** button at the bottom.
+#### Option A: Via AWS Console (UI)
+1. Click **Endpoints** $\to$ click **Create endpoint**.
+2. **Endpoint type**: Select **Source endpoint**.
+3. **Endpoint identifier**: `dms-source-db01`.
+4. **Source engine**: **PostgreSQL**.
+5. **Access info**: Select **Provide access information manually**.
+   - **Server name**: `10.10.10.30`
+   - **Port**: `5432`
+   - **User name**: `streamflix_user`
+   - **Password**: `StreamFlixPass2026!`
+   - **Database name**: `streamflix_db`
+   - **Secure Sockets Layer (SSL) mode**: **none** *(Traffic is hardware-encrypted inside the IPsec tunnel)*.
+6. Click **Create endpoint**.
 
-#### Option B: Via AWS CLI Command
+#### Option B: Via AWS CLI
 ```bash
 aws dms create-endpoint \
   --endpoint-identifier dms-source-db01 \
@@ -382,27 +437,27 @@ aws dms create-endpoint \
 
 ---
 
-### Step 3.4: Create Target Endpoint (Pointing to AWS RDS)
+### Step 3.4: Create Target Endpoint (`dms-target-rds`)
 
-#### Option A: Via AWS Management Console (Click-by-Click UI)
-1. In the DMS left navigation menu, click **Endpoints**.
-2. Click the orange **Create endpoint** button.
-3. **Endpoint type**: Select **Target endpoint**.
-4. **Select RDS DB instance**:
-   * *Option 1*: Check **Select RDS DB instance** and choose `streamflix-target-db` from the dropdown list.
-   * *Option 2 (Manual)*: Leave unchecked and fill in:
-     * **Endpoint identifier**: Enter `dms-target-rds`.
-     * **Target engine**: Select **PostgreSQL**.
-     * **Access to endpoint database**: Select **Provide access information manually**.
-     * **Server name**: Paste your RDS Endpoint address from Step 2.2 (`streamflix-target-db.xxxx.us-east-1.rds.amazonaws.com`).
-     * **Port**: Enter `5432`.
-     * **User name**: Enter `postgres`.
-     * **Password**: Enter `MasterAdminPass2026!`.
-     * **Database name**: Enter `streamflix_db`.
-     * **Secure Sockets Layer (SSL) mode**: Select **require**.
-5. Click the orange **Create endpoint** button at the bottom.
+> [!IMPORTANT]
+> **CRITICAL CONFIGURATION**: Amazon RDS PostgreSQL strictly requires SSL encryption (`hostssl`). Under **Secure Sockets Layer (SSL) mode**, you **MUST select `require`** (CLI: `--ssl-mode require`). Setting `none` results in:
+> `FATAL: no pg_hba.conf entry for host "...", user "postgres", database "streamflix_db", no encryption`.
 
-#### Option B: Via AWS CLI Command
+#### Option A: Via AWS Console (UI)
+1. Click **Endpoints** $\to$ click **Create endpoint**.
+2. **Endpoint type**: Select **Target endpoint**.
+3. **Endpoint identifier**: `dms-target-rds`.
+4. **Target engine**: **PostgreSQL**.
+5. **Access info**: Select **Provide access information manually**.
+   - **Server name**: Paste your RDS Endpoint address (`streamflix-target-db.xxxx.us-east-1.rds.amazonaws.com`).
+   - **Port**: `5432`
+   - **User name**: `postgres`
+   - **Password**: `MasterAdminPass2026!`
+   - **Database name**: `streamflix_db`
+   - **Secure Sockets Layer (SSL) mode**: **require** *(Mandatory for RDS)*.
+6. Click **Create endpoint**.
+
+#### Option B: Via AWS CLI
 ```bash
 aws dms create-endpoint \
   --endpoint-identifier dms-target-rds \
@@ -421,69 +476,69 @@ aws dms create-endpoint \
 
 ### Step 3.5: Test Cross-Cloud Connectivity on Both Endpoints
 
-Once your replication instance `streamflix-dms-instance` status shows **`Available`**:
+Once `streamflix-dms-instance` status is **`Available`**:
 
-#### Option A: Via AWS Management Console (Click-by-Click UI)
-1. In the DMS left navigation menu, click **Endpoints**.
-2. Select **`dms-source-db01`** $\to$ In the **Actions** dropdown menu at the top right, click **Test connection**.
-   * Replication instance: Select `streamflix-dms-instance`.
-   * Click **Run test**.
-   * Status will change to **`Testing`** and then turn green: **`successful`**!
-3. Select **`dms-target-rds`** $\to$ In the **Actions** dropdown menu, click **Test connection**.
-   * Replication instance: Select `streamflix-dms-instance`.
-   * Click **Run test**.
-   * Status will change to **`Testing`** and then turn green: **`successful`**!
+#### Option A: Via AWS Console (UI)
+1. Go to **Endpoints** $\to$ Select `dms-source-db01` $\to$ **Actions** $\to$ **Test connection**.
+   - Replication instance: `streamflix-dms-instance` $\to$ click **Run test**.
+   - *Status changes to `successful` (green).*
+2. Select `dms-target-rds` $\to$ **Actions** $\to$ **Test connection**.
+   - Replication instance: `streamflix-dms-instance` $\to$ click **Run test**.
+   - *Status changes to `successful` (green).*
 
-#### Option B: Via AWS CLI Command
+#### Option B: Via AWS CLI
 ```bash
-# Retrieve ARNs
 REP_ARN=$(aws dms describe-replication-instances --filters "Name=replication-instance-id,Values=streamflix-dms-instance" --query 'ReplicationInstances[0].ReplicationInstanceArn' --output text --region us-east-1)
 SRC_ARN=$(aws dms describe-endpoints --filters "Name=endpoint-id,Values=dms-source-db01" --query 'Endpoints[0].EndpointArn' --output text --region us-east-1)
 TGT_ARN=$(aws dms describe-endpoints --filters "Name=endpoint-id,Values=dms-target-rds" --query 'Endpoints[0].EndpointArn' --output text --region us-east-1)
 
-# Trigger tests
 aws dms test-connection --replication-instance-arn "$REP_ARN" --endpoint-arn "$SRC_ARN" --region us-east-1
 aws dms test-connection --replication-instance-arn "$REP_ARN" --endpoint-arn "$TGT_ARN" --region us-east-1
 
-# Check results
+# Verify both are successful
 aws dms describe-connections --query 'Connections[*].{Endpoint:EndpointIdentifier,Status:Status}' --output table --region us-east-1
 ```
 
+#### Diagnostic Table for Endpoint Test Failures:
+| Symptom / Error | Root Cause | Immediate Fix |
+| :--- | :--- | :--- |
+| `timeout expired / Read timed out` (Source) | `virbr10` packet reject or missing AWS route | Run Step 0.1 iptables rules on `HV01` and verify AWS route `10.10.0.0/16` -> `vgw`. |
+| `FATAL: password authentication failed` (Source) | `pg_hba.conf` had `md5` instead of SCRAM | Verify Step 1.4: change `md5` to `scram-sha-256` in `pg_hba.conf` and reload postgresql. |
+| `no pg_hba.conf entry ... no encryption` (Target) | Target endpoint SSL mode was `none` | Run: `aws dms modify-endpoint --endpoint-arn <TGT_ARN> --ssl-mode require`. |
+
 ---
 
-## 5. Phase 4: Create & Run the Full Load + CDC Migration Task (UI Console)
+## 6. Phase 4: Create & Run Full Load + CDC Replication Task
 
-Now we create the replication task that performs the initial copy and enables real-time Change Data Capture.
+### Step 4.1: Create the Replication Task
 
-### Step 4.1: Create the Task
+> [!IMPORTANT]
+> **Premigration Assessment (Console Trap)**: In the AWS Management Console wizard, scroll down to the **Premigration assessment** section and **UNCHECK** the box **"Turn on premigration assessment"**. If left checked, AWS DMS disables the **"Automatically on create"** radio button.
 
-#### Option A: Via AWS Management Console (Click-by-Click UI)
-1. In the DMS left navigation menu, click **Database migration tasks**.
-2. Click the orange **Create task** button.
-3. **Task configuration**:
-   * **Task identifier**: Enter `dms-task-streamflix-cdc`.
-   * **Replication instance**: Select `streamflix-dms-instance`.
-   * **Source database endpoint**: Select `dms-source-db01`.
-   * **Target database endpoint**: Select `dms-target-rds`.
-   * **Migration type**: Select **`Migrate existing data and replicate ongoing changes`** *(This is Full Load + CDC!)*.
-4. **Task settings**:
-   * **Target table preparation mode**: Select **Do nothing** (or Drop tables on target).
-   * **Stop task after full load completes**: Select **Don't stop** *(Keeps CDC listening for live changes!)*.
-   * **Include LOB columns in replication**: Select **Limited LOB mode** $\to$ Max LOB size: `32` KB.
-   * **Turn on CloudWatch logs**: Check this box (helpful for telemetry).
-5. **Table mappings** *(Using the UI Wizard)*:
-   * **Editing mode**: Select **Wizard**.
-   * Under **Selection rules**, click the white **Add new selection rule** button:
-     * **Schema**: Enter `public`.
-     * **Source table name**: Enter `%` *(The percent symbol means ALL tables in this schema)*.
-     * **Action**: Select **Include**.
-6. **Migration task startup configuration**:
-   * Select **Automatically on create**.
-7. Click the orange **Create task** button at the bottom.
+#### Option A: Via AWS Console (UI)
+1. Click **Database migration tasks** $\to$ click **Create task**.
+2. **Task configuration**:
+   - **Task identifier**: `dms-task-streamflix-cdc`
+   - **Replication instance**: `streamflix-dms-instance`
+   - **Source endpoint**: `dms-source-db01`
+   - **Target endpoint**: `dms-target-rds`
+   - **Migration type**: Select **Migrate existing data and replicate ongoing changes** *(Full Load + CDC)*.
+3. **Task settings**:
+   - **Target table preparation mode**: Select **Do nothing** (or Drop tables on target).
+   - **Stop task after full load completes**: Select **Don't stop** *(Keeps CDC listening!)*.
+   - **Include LOB columns**: Select **Limited LOB mode** $\to$ Max LOB size: `32` KB.
+   - **Turn on CloudWatch logs**: Checked.
+4. **Table mappings (Wizard)**:
+   - Click **Add new selection rule**:
+     - **Schema**: `public`
+     - **Source table name**: `%` *(All tables)*
+     - **Action**: `Include`
+5. **Premigration assessment**: **UNCHECK** *"Turn on premigration assessment"*.
+6. **Migration task startup configuration**: Select **Automatically on create**.
+7. Click **Create task**.
 
-#### Option B: Via AWS CLI Command
+#### Option B: Via AWS CLI
 ```bash
-# 1. Create table mapping JSON
 cat << 'EOF' > /tmp/table-mappings.json
 {
   "rules": [
@@ -501,7 +556,6 @@ cat << 'EOF' > /tmp/table-mappings.json
 }
 EOF
 
-# 2. Create and start task
 aws dms create-replication-task \
   --replication-task-identifier dms-task-streamflix-cdc \
   --source-endpoint-arn "$SRC_ARN" \
@@ -519,26 +573,21 @@ aws dms start-replication-task --replication-task-arn "$TASK_ARN" --start-replic
 ---
 
 ### Step 4.2: Monitor Task Progress in UI Console
-
-1. In the **Database migration tasks** list, click on **`dms-task-streamflix-cdc`**.
-2. Watch the status transition:
-   * `Creating` $\to$ `Starting` $\to$ `Running`.
-3. Click on the **Table statistics** tab in the middle of the page:
-   * You will see the table **`movies`** appear!
-   * Look at **Total rows**: It will show `3`.
-   * Look at **Full load rows**: It will show `3`.
-   * Look at **State**: It will show **`Table completed`**.
-4. In the **Overview details** tab:
-   * Status will proudly display: **`Load complete, replication ongoing`**!
+1. In **Database migration tasks**, click `dms-task-streamflix-cdc`.
+2. Status transitions: `Creating` $\to$ `Starting` $\to$ `Running`.
+3. In **Table statistics**:
+   - `movies`: Full load rows shows **`3`**, State shows **`Table completed`**.
+4. In **Overview details**:
+   - Status displays: **`Load complete, replication ongoing`**.
 
 ---
 
 ### Step 4.3: Verify Initial Data in RDS
-Connect to your RDS database and verify the initial 3 rows:
+From `HV01` (or `DB01`):
 
 ```bash
 PGPASSWORD='MasterAdminPass2026!' psql \
-  -h "<YOUR_RDS_ENDPOINT>" \
+  -h "$RDS_ENDPOINT" \
   -U postgres \
   -d streamflix_db \
   -c "SELECT count(*) FROM movies;"
@@ -547,53 +596,38 @@ PGPASSWORD='MasterAdminPass2026!' psql \
 
 ---
 
-## 6. Phase 5: The Proof — Real-Time Cross-Cloud CDC Test! 🚀
+## 7. Phase 5: Live Real-Time CDC Test
 
-This is the most exciting demonstration of Method B. You will insert a new movie on your on-premises database in Azure, and watch it **replicate automatically to AWS RDS within milliseconds** over the IPsec VPN!
+Verify that live on-premises database transactions replicate across clouds to Amazon RDS in real time over the IPsec tunnel.
 
-### Step 5.1: Insert a New Movie on DB01 (Azure)
-SSH into **`DB01`**:
-
+### Step 5.1: Insert a 4th Movie on DB01 (Azure)
+From `DB01`:
 ```bash
-ssh -i /home/labadmin/Enterprise_Cloud_Migration_Lab/stage-1/vagrant/db01/.vagrant/machines/default/libvirt/private_key vagrant@10.10.10.30
-```
-
-Insert a 4th movie into the live database:
-```sql
 sudo -u postgres psql -d streamflix_db -c "
 INSERT INTO movies (title, release_year, genre, rating) 
 VALUES ('The Matrix Resurrections', 2021, 'Sci-Fi', '5.7');
 "
-```
 
-Verify it exists locally on `DB01`:
-```bash
+# Check local count
 sudo -u postgres psql -d streamflix_db -c "SELECT count(*) FROM movies;"
 ```
-*(Now 4 rows on DB01).*
-
-Exit `DB01`:
-```bash
-exit
-```
+*(Local count: 4 rows).*
 
 ---
 
-### Step 5.2: Watch the Change in the AWS DMS Console
-1. In the AWS Management Console $\to$ Go to **DMS** $\to$ **Database migration tasks** $\to$ Click **`dms-task-streamflix-cdc`**.
-2. Click the **Table statistics** tab:
-   * Look at the **Inserts** column for `movies`!
-   * It will show **`1`** (or increment)!
-3. Look at **CDC latency**: It will show **`0 seconds`**!
+### Step 5.2: Observe Real-Time CDC in DMS Console
+1. In the DMS Console $\to$ **Database migration tasks** $\to$ `dms-task-streamflix-cdc`.
+2. Click **Table statistics**:
+   - **Inserts** column for `movies` increments to **`1`**.
+   - **CDC latency**: shows **`0 seconds`**.
 
 ---
 
-### Step 5.3: Check Target RDS (AWS)
-Query your Amazon RDS PostgreSQL instance:
-
+### Step 5.3: Verify Replicated Row in Target RDS (AWS)
+Query RDS using the master admin password:
 ```bash
 PGPASSWORD='MasterAdminPass2026!' psql \
-  -h "<YOUR_RDS_ENDPOINT>" \
+  -h "$RDS_ENDPOINT" \
   -U postgres \
   -d streamflix_db \
   -c "SELECT id, title, release_year, rating FROM movies ORDER BY id;"
@@ -609,28 +643,21 @@ PGPASSWORD='MasterAdminPass2026!' psql \
   4 | The Matrix Resurrections   |         2021 | 5.7
 (4 rows)
 ```
-
-🎉 **The new movie replicated instantly across clouds via Change Data Capture over your encrypted IPsec VPN!**
-
----
-
-## 7. Phase 6: The 60-Second Near-Zero Downtime Cutover
-
-Because AWS DMS is continuously streaming changes, your cutover requires only switching the application's database host.
-
-### Step 7.1: Check CDC Latency in DMS Console
-In the task overview, confirm that **CDC incoming changes** has no backlog and latency is **`0 seconds`**.
+🎉 **Live transaction replicated across clouds via CDC with zero downtime!**
 
 ---
 
-### Step 7.2: Re-target StreamFlix Application on APP01
+## 8. Phase 6: 60-Second Application Cutover
+
+Because changes replicate continuously with 0 seconds latency, cutover only requires redirecting `APP01` to the RDS endpoint.
+
+### Step 6.1: Update Application Configuration on APP01
 SSH into **`APP01`**:
-
 ```bash
 ssh -i /home/labadmin/Enterprise_Cloud_Migration_Lab/stage-1/vagrant/app01/.vagrant/machines/default/libvirt/private_key vagrant@10.10.10.20
 ```
 
-Update `/var/www/streamflix/backend/.env` with your new RDS endpoint:
+Update `/var/www/streamflix/backend/.env`:
 ```bash
 cat << EOF | sudo tee /var/www/streamflix/backend/.env
 PORT=5000
@@ -649,77 +676,77 @@ sudo systemctl restart streamflix
 
 ---
 
-### Step 7.3: Verify StreamFlix Application Health
-Test the live application endpoints:
-
+### Step 6.2: Verify StreamFlix Application Health
 ```bash
 # 1. Health endpoint
 curl -s http://localhost/api/health | jq .
 
-# 2. Movie catalog (should return all 4 movies from RDS!)
+# 2. Movie catalog (returns all 4 rows from RDS!)
 curl -s http://localhost/api/movies | jq .
 ```
 
-**Expected Health Output:**
+Expected Health JSON:
 ```json
 {
   "status": "UP",
   "service": "StreamFlix API",
   "host": "APP01",
-  "database": "CONNECTED",
-  "timestamp": "2026-11-04T..."
+  "database": "CONNECTED"
 }
 ```
 
-Exit `APP01`:
+---
+
+### Step 6.3: Stop the DMS Task (Cost Control)
+In the DMS Console $\to$ **Database migration tasks** $\to$ Select `dms-task-streamflix-cdc` $\to$ **Actions** $\to$ click **Stop**.
+
+---
+
+## 9. Master Quick-Remediation Scripts (Turnkey Automation)
+
+If rebuilding or automating this setup in a fresh environment, run these three master scripts:
+
+### Script A: Run on Hypervisor (`HV01`)
 ```bash
-exit
+#!/usr/bin/env bash
+set -e
+sudo sysctl -w net.ipv4.ip_forward=1
+echo "net.ipv4.ip_forward = 1" | sudo tee -a /etc/sysctl.d/99-ipforward.conf
+sudo iptables -I FORWARD 1 -d 10.10.10.0/24 -o virbr10 -j ACCEPT
+sudo iptables -I FORWARD 1 -s 10.10.10.0/24 -i virbr10 -j ACCEPT
+sudo iptables -t nat -I POSTROUTING 1 -s 10.10.10.0/24 -d 10.20.0.0/16 -j ACCEPT
+sudo sed -i 's/esp=.*/esp=aes256gcm16-sha256,aes256-sha256-modp2048,aes256-sha256,aes128-sha1-modp1024,aes128-sha1!/' /etc/ipsec.conf
+sudo systemctl restart strongswan-starter
+echo "[SUCCESS] HV01 network forwarding, firewall, and StrongSwan configured."
 ```
 
----
+### Script B: Run on Database Server (`DB01`)
+```bash
+#!/usr/bin/env bash
+set -e
+sudo ip route add 10.20.0.0/16 via 10.10.10.1 dev eth1 2>/dev/null || sudo ip route replace 10.20.0.0/16 via 10.10.10.1 dev eth1
+sudo sed -i "s/#listen_addresses = 'localhost'/listen_addresses = '*'/" /etc/postgresql/16/main/postgresql.conf
+sudo sed -i "s/listen_addresses = 'localhost'/listen_addresses = '*'/" /etc/postgresql/16/main/postgresql.conf
+sudo tee -a /etc/postgresql/16/main/postgresql.conf << 'EOF'
+wal_level = logical
+max_replication_slots = 5
+max_wal_senders = 5
+EOF
+sudo tee -a /etc/postgresql/16/main/pg_hba.conf << 'EOF'
+host    all             all             10.20.0.0/16            scram-sha-256
+host    replication     all             10.20.0.0/16            scram-sha-256
+EOF
+sudo systemctl restart postgresql
+sudo -u postgres psql -c "ALTER USER streamflix_user WITH SUPERUSER;"
+sudo -u postgres psql -c "ALTER USER streamflix_user WITH REPLICATION;"
+sudo -u postgres psql -c "ALTER USER streamflix_user WITH PASSWORD 'StreamFlixPass2026!';"
+sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO streamflix_user;"
+echo "[SUCCESS] DB01 PostgreSQL and routing configured for AWS DMS."
+```
 
-### Step 7.4: Stop the DMS Task in the Console (Cost Optimization)
-Once cutover is complete and traffic is running happily against RDS, stop the DMS task so it doesn't incur ongoing charges:
-
-1. In the DMS Console $\to$ **Database migration tasks**.
-2. Select **`dms-task-streamflix-cdc`**.
-3. In the **Actions** dropdown menu at the top right, click **Stop**.
-4. Confirm stopping the task.
-
----
-
-## 8. Verification Checklist & Success Criteria
-
-| # | Check Item | Verification in UI Console / Terminal | Expected Result | Status |
-| :-: | :--- | :--- | :--- | :-: |
-| 1 | **WAL Configuration** | `SHOW wal_level;` on DB01 | `logical` | [ ] |
-| 2 | **RDS Provisioning** | RDS Console $\to$ Databases | Status: `Available` | [ ] |
-| 3 | **DMS Replication Instance** | DMS Console $\to$ Replication instances | Status: `Available` | [ ] |
-| 4 | **Endpoint Connectivity** | DMS Console $\to$ Endpoints | Both `successful` (green) | [ ] |
-| 5 | **Full Load Execution** | DMS Console $\to$ Table statistics | `Full load rows: 3` | [ ] |
-| 6 | **CDC Real-Time Sync** | Insert row on `DB01` $\to$ query RDS | 4th row appears instantly | [ ] |
-| 7 | **Application Cutover** | `curl -s http://10.10.10.20/api/health` | `database: "CONNECTED"` | [ ] |
-| 8 | **Catalog Verification** | `curl -s http://10.10.10.20/api/movies` | 4 movies returned from RDS | [ ] |
-
----
-
-## 9. Rollback Runbook (In Case of Issues)
-
-If any issue arises after cutover:
-1. Revert `APP01` back to `DB01`:
-   ```bash
-   cat << EOF | sudo tee /var/www/streamflix/backend/.env
-   PORT=5000
-   DB_HOST=10.10.10.30
-   DB_PORT=5432
-   DB_NAME=streamflix_db
-   DB_USER=streamflix_user
-   DB_PASSWORD=StreamFlixPass2026!
-   EOF
-   sudo systemctl restart streamflix
-   ```
-2. Verify local connectivity:
-   ```bash
-   curl -s http://localhost/api/health
-   ```
-   *The application will immediately resume pointing to local `DB01`.*
+### Script C: Run via AWS CLI (Routing & Enforce SSL)
+```bash
+aws ec2 create-route --route-table-id <APP_PRIVATE_RT_ID> --destination-cidr-block 10.10.0.0/16 --gateway-id <VGW_ID>
+aws ec2 create-route --route-table-id <DB_ISOLATED_RT_ID> --destination-cidr-block 10.10.0.0/16 --gateway-id <VGW_ID>
+aws dms modify-endpoint --endpoint-arn <TARGET_ENDPOINT_ARN> --ssl-mode require
+```
