@@ -119,6 +119,7 @@ cat << 'BACKEND_EOF' > "${APP_ROOT}/backend/package.json"
 BACKEND_EOF
 
 cat << 'BACKEND_SERVER_EOF' > "${APP_ROOT}/backend/server.js"
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
@@ -126,16 +127,38 @@ const { Pool } = require('pg');
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+const isRds = process.env.DB_HOST && !process.env.DB_HOST.includes('10.10.10.30') && !process.env.DB_HOST.includes('localhost');
+
 const pool = new Pool({
   host: process.env.DB_HOST || '10.10.10.30',
   port: parseInt(process.env.DB_PORT || '5432'),
   user: process.env.DB_USER || 'streamflix_user',
   password: process.env.DB_PASSWORD || 'StreamFlixPass2026!',
-  database: process.env.DB_NAME || 'streamflix_db'
+  database: process.env.DB_NAME || 'streamflix_db',
+  ssl: isRds ? { rejectUnauthorized: false } : false
 });
 
 app.use(cors());
 app.use(express.json());
+
+const getMediaBaseUrl = () => (process.env.MEDIA_BASE_URL || '').trim().replace(/\/$/, '');
+
+function formatMovie(movie) {
+  const mediaBase = getMediaBaseUrl();
+  const posterRel = movie.poster_path ? movie.poster_path.replace(/^\/media/, '') : '';
+  const videoRel = movie.video_path ? movie.video_path.replace(/^\/media/, '') : '';
+
+  const posterUrl = mediaBase ? `${mediaBase}${posterRel}` : movie.poster_path;
+  const videoUrl = mediaBase ? `${mediaBase}${videoRel}` : movie.video_path;
+
+  return {
+    ...movie,
+    poster_path: posterUrl,
+    video_path: videoUrl,
+    poster_url: posterUrl,
+    video_url: videoUrl
+  };
+}
 
 app.get('/api/health', async (req, res) => {
   try {
@@ -145,6 +168,8 @@ app.get('/api/health', async (req, res) => {
       service: 'StreamFlix API',
       host: 'APP01',
       database: dbCheck.rows[0].alive === 1 ? 'CONNECTED' : 'DISCONNECTED',
+      db_target: process.env.DB_HOST ? 'AWS RDS (' + process.env.DB_HOST + ')' : 'On-Premises (10.10.10.30)',
+      media_base_url: getMediaBaseUrl() || 'local (/media)',
       timestamp: new Date().toISOString()
     });
   } catch (err) {
@@ -160,7 +185,7 @@ app.get('/api/health', async (req, res) => {
 app.get('/api/movies', async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM movies ORDER BY id ASC');
-    res.json(rows);
+    res.json(rows.map(formatMovie));
   } catch (err) {
     res.status(500).json({ error: 'Failed to retrieve movie catalog', details: err.message });
   }
@@ -170,7 +195,7 @@ app.get('/api/movies/:id', async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM movies WHERE id = $1', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ error: 'Movie not found' });
-    res.json(rows[0]);
+    res.json(formatMovie(rows[0]));
   } catch (err) {
     res.status(500).json({ error: 'Failed to retrieve movie details', details: err.message });
   }
@@ -201,6 +226,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/var/www/streamflix/backend
+EnvironmentFile=-/var/www/streamflix/backend/.env
 ExecStart=/usr/bin/node server.js
 Restart=always
 RestartSec=5

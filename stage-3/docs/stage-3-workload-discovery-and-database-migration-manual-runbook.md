@@ -348,6 +348,13 @@ PGPASSWORD='MasterAdminPass2026!' psql \
   -U postgres \
   -d streamflix_db \
   -c "GRANT ALL PRIVILEGES ON DATABASE streamflix_db TO streamflix_user;"
+
+# Grant permissions on public schema, tables, and default privileges for future migrated tables
+PGPASSWORD='MasterAdminPass2026!' psql \
+  -h "$RDS_ENDPOINT" \
+  -U postgres \
+  -d streamflix_db \
+  -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO streamflix_user; GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO streamflix_user; ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO streamflix_user;"
 ```
 
 ---
