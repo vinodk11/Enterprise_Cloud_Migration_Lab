@@ -256,6 +256,7 @@ After=network.target
 Type=simple
 User=ubuntu
 WorkingDirectory=/var/www/streamflix/backend
+EnvironmentFile=-/var/www/streamflix/backend/.env
 ExecStart=/usr/bin/node /var/www/streamflix/backend/server.js
 Restart=always
 RestartSec=5
