@@ -210,6 +210,9 @@ Environment=PORT=5000
 WantedBy=multi-user.target
 SYSTEMD_EOF
 
+# Provide alias symlink so both streamflix and streamflix-backend work seamlessly
+ln -sf /etc/systemd/system/streamflix-backend.service /etc/systemd/system/streamflix.service
+
 systemctl daemon-reload
 systemctl enable --now streamflix-backend 2>/dev/null || systemctl restart streamflix-backend 2>/dev/null || true
 echo "[OK] StreamFlix Express API systemd service running on port 5000."
