@@ -604,8 +604,8 @@ Verify that live on-premises database transactions replicate across clouds to Am
 From `DB01`:
 ```bash
 sudo -u postgres psql -d streamflix_db -c "
-INSERT INTO movies (title, release_year, genre, rating) 
-VALUES ('The Matrix Resurrections', 2021, 'Sci-Fi', '5.7');
+INSERT INTO movies (title, description, release_year, genre, duration_minutes, poster_path, video_path) 
+VALUES ('The Matrix Resurrections', 'Return to a world of two realities.', 2021, 'Sci-Fi', 148, '/media/posters/matrix.svg', '/media/videos/matrix.mp4');
 "
 
 # Check local count
@@ -630,17 +630,17 @@ PGPASSWORD='MasterAdminPass2026!' psql \
   -h "$RDS_ENDPOINT" \
   -U postgres \
   -d streamflix_db \
-  -c "SELECT id, title, release_year, rating FROM movies ORDER BY id;"
+  -c "SELECT id, title, release_year, genre FROM movies ORDER BY id;"
 ```
 
 **Expected Output:**
 ```text
- id |           title            | release_year | rating 
-----+----------------------------+--------------+--------
-  1 | Inception                  |         2010 | 8.8
-  2 | The Dark Knight            |         2008 | 9.0
-  3 | Interstellar               |         2014 | 8.6
-  4 | The Matrix Resurrections   |         2021 | 5.7
+ id |            title            | release_year |    genre    
+----+-----------------------------+--------------+-------------
+  1 | Cloud Migration Chronicles  |         2026 | Documentary
+  2 | KVM Virtualization Horizons |         2025 | Sci-Fi
+  3 | Samba in the Datacenter     |         2024 | Tech Drama
+  4 | The Matrix Resurrections    |         2021 | Sci-Fi
 (4 rows)
 ```
 🎉 **Live transaction replicated across clouds via CDC with zero downtime!**
