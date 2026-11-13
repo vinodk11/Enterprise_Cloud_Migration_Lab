@@ -435,7 +435,8 @@ EOF
 
 Restart the StreamFlix application service:
 ```bash
-sudo systemctl restart streamflix
+sudo systemctl restart streamflix-backend
+sudo systemctl status streamflix-backend --no-pager
 ```
 
 ---
@@ -495,7 +496,8 @@ If CloudFront or S3 testing requires temporary rollback:
    DB_PASSWORD=StreamFlixPass2026!
    MEDIA_BASE_URL=/media
    EOF
-   sudo systemctl restart streamflix
+   sudo systemctl restart streamflix-backend
+   sudo systemctl status streamflix-backend --no-pager
    ```
 2. Verify local playback:
    ```bash

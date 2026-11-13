@@ -671,7 +671,8 @@ EOF
 
 Restart the service:
 ```bash
-sudo systemctl restart streamflix
+sudo systemctl restart streamflix-backend
+sudo systemctl status streamflix-backend --no-pager
 ```
 
 ---
