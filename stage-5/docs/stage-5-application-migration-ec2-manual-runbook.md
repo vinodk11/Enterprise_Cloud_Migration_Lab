@@ -107,6 +107,8 @@ Instead, enterprise migrations leverage **AWS Application Migration Service (AWS
 | **DB Security Group** | Group ID | `sg-075c1320653bd7215` | Name: `streamflix-target-db-sg` |
 | **ALB Security Group** | Group Name | `streamflix-alb-sg` | Public ingress on Port 80 and 443 |
 | **Replication Template**| Template ID | `rct-308d988f0aeebc90d` | Configured with `dataPlaneRouting: PRIVATE_IP` |
+| **Launch Config Template**| Template ID | `lct-3442db0a84143a61f` | AWS MGN Account Launch Configuration Template |
+| **EC2 Launch Template**| Template ID | `lt-0922d1ce857d3b781` | Version 2 (Default): `t3.micro`, `CloudForge` |
 | **Replication Port** | TCP Port | `1500` | Inbound port for block data replication |
 | **IAM Installer User**| Username | `mgn-installer-user` | IAM user with `AWSApplicationMigrationAgentInstallationPolicy` |
 | **Target Instance Type**| Instance Class | `t3.micro` (or `t3.small`) | Compute size for target EC2 instance |
@@ -259,25 +261,75 @@ aws ec2 authorize-security-group-ingress \
 
 ### Step 1.4: Configure Launch Template Settings for Target EC2
 
-AWS MGN uses an EC2 Launch Template to control how test and cutover instances are launched:
+AWS MGN uses an **Account-Level Launch Configuration Template** (`lct-3442db0a84143a61f`) backed by an **Amazon EC2 Launch Template** (`lt-0922d1ce857d3b781`) to control how test and cutover instances are provisioned.
 
-#### Option A: Via AWS Management Console (Click-by-Click UI)
+> [!NOTE]
+> **Why Launch Template Settings cannot be edited directly in-place:**
+> 1. AWS EC2 Launch Templates are strictly **immutable and version-controlled**. You cannot "edit" an existing version; you must create a new version (e.g. Version 2) and mark it as the **Default Version**.
+> 2. Until an account has an initialized Launch Configuration Template (`lct-...`), the AWS MGN Console will not display the "Modify launch template" options.
+> 3. We have initialized the MGN template **`lct-3442db0a84143a61f`** and configured EC2 Launch Template **`lt-0922d1ce857d3b781`** Version 2 as Default with `t3.micro`, private subnet `subnet-094426acfea458e5c`, and security group `sg-0c7841ad581251d1d`.
+
+#### Option A: Via AWS Management Console (Viewing & Modifying)
 1. In the AWS MGN left navigation pane, under **Settings**, click **Launch template**.
-2. Click **Modify launch template**:
-   * **Instance type**: Select `t3.micro` (or `t3.small`).
-   * **Key pair (login)**: Select `CloudForge`.
-   * **Network settings**:
+2. You will now see the active Launch Configuration Template linked to EC2 Launch Template **`lt-0922d1ce857d3b781`**.
+3. To view or make changes to the EC2 Launch Template:
+   * Click **Modify launch template** (or open the **Amazon EC2 Console** $\to$ **Launch Templates** $\to$ select `created-and-used-by-application-migration-service...` `lt-0922d1ce857d3b781`).
+   * Click **Actions** $\to$ **Modify template (Create new version)**.
+   * Under **Template version description**: Enter `StreamFlix Target EC2 Configuration`.
+   * Under **Instance type**: Ensure `t3.micro` is selected.
+   * Under **Key pair (login)**: Select `CloudForge`.
+   * Under **Network settings**:
      * Subnet: Select `streamflix-target-app-private-1a` (`subnet-094426acfea458e5c`).
      * Security groups: Select `streamflix-target-app-sg` (`sg-0c7841ad581251d1d`).
-     * Auto-assign public IP: **Disable** (enforcing private subnet isolation).
-3. Click **Save launch template**.
+     * Auto-assign public IP: **Disable**.
+   * Click **Create template version**.
+   * Click **Actions** $\to$ **Set default version** $\to$ Select the newly created version $\to$ Click **Set as default version**.
 
-#### Option B: Via AWS CLI Command
+#### Option B: Via AWS CLI Command (Already Configured)
 ```bash
-# Launch template configurations are managed directly by AWS MGN template APIs
-aws mgn get-launch-configuration \
-  --source-server-id <SOURCE_SERVER_ID> \
-  --region us-east-1 2>/dev/null || true
+# 1. Create a configured version (Version 2) of the EC2 Launch Template
+aws ec2 create-launch-template-version \
+  --launch-template-id lt-0922d1ce857d3b781 \
+  --source-version 1 \
+  --version-description "StreamFlix Target EC2 Configuration" \
+  --launch-template-data '{
+    "InstanceType": "t3.micro",
+    "KeyName": "CloudForge",
+    "NetworkInterfaces": [
+      {
+        "DeviceIndex": 0,
+        "SubnetId": "subnet-094426acfea458e5c",
+        "Groups": ["sg-0c7841ad581251d1d"],
+        "AssociatePublicIpAddress": false
+      }
+    ],
+    "TagSpecifications": [
+      {
+        "ResourceType": "instance",
+        "Tags": [
+          {"Key": "Name", "Value": "streamflix-app-ec2"},
+          {"Key": "Environment", "Value": "Production"},
+          {"Key": "Project", "Value": "StreamFlix"},
+          {"Key": "AWSApplicationMigrationServiceManaged", "Value": "mgn.amazonaws.com"}
+        ]
+      }
+    ]
+  }' \
+  --region us-east-1
+
+# 2. Set Version 2 as the Default version
+aws ec2 modify-launch-template \
+  --launch-template-id lt-0922d1ce857d3b781 \
+  --default-version 2 \
+  --region us-east-1
+
+# 3. Update the MGN Launch Configuration Template
+aws mgn update-launch-configuration-template \
+  --launch-configuration-template-id lct-3442db0a84143a61f \
+  --launch-disposition STARTED \
+  --no-associate-public-ip-address \
+  --target-instance-type-right-sizing-method NONE \
+  --region us-east-1
 ```
 
 ---
