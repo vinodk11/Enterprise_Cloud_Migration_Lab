@@ -1,60 +1,95 @@
-# Stage 5: Application Migration Manual Runbook — StreamFlix Lift-and-Shift to Amazon EC2 & ALB
-**Document ID**: RUNBOOK-STAGE5-APP-MIGRATION-EC2-ALB-20261104  
-**Target Audience**: Cloud Migration Engineers, Solutions Architects, DevSecOps  
-**Lab Context**: Enterprise Cloud Migration Lab (StreamFlix Application Tier)  
-**Strategy**: VM-Based Rehost / Lift-and-Shift to Amazon EC2 behind Application Load Balancer  
-**UI Focus**: Dual Click-by-Click AWS Management Console & Terminal CLI Instructions  
+# Stage 5: Enterprise Application Server Migration Manual Runbook — Migrating APP01 to Amazon EC2 via AWS Application Migration Service (AWS MGN) & ALB
+**Document ID**: RUNBOOK-STAGE5-APP-MIGRATION-MGN-EC2-ALB-20261116  
+**Target Audience**: Cloud Migration Engineers, Solutions Architects, DevSecOps Leads  
+**Lab Context**: Enterprise Cloud Migration Lab (StreamFlix Application Server Rehost)  
+**Strategy**: Enterprise Automated Block-Level Server Rehost (Lift-and-Shift) via AWS Application Migration Service (AWS MGN) behind Application Load Balancer (ALB)  
+**UI Focus**: Dual Click-by-Click AWS Management Console & Terminal CLI / Shell Instructions  
 
 ---
 
-## 1. Architectural Overview & Traffic Flow
+## 1. Architectural Overview & Migration Lifecycle
 
-In **Stage 5**, you will migrate the core StreamFlix web and application tier from the on-premises virtual machine (`APP01` on Azure) to an **Amazon Elastic Compute Cloud (Amazon EC2)** instance deployed inside your private application subnets, protected by an **Application Load Balancer (ALB)**.
+In an enterprise cloud migration following the **AWS Migration Acceleration Program (MAP)** framework, migrating a mission-critical application server (`APP01`) does **not** involve manually spinning up an empty operating system and attempting to manually reinstall libraries or copy code snippets. 
 
-This follows the classic enterprise **Lift-and-Shift / Replatform (IaaS)** migration pattern:
-* The EC2 instance mirrors `APP01` (Ubuntu 24.04 LTS, Node.js 18, Express API on Port 5000, Nginx on Port 80).
-* The EC2 instance sits securely inside the **private application subnet** (`10.20.10.0/24`) with **no direct public IP**, protecting it from internet threats.
-* An internet-facing **Application Load Balancer (ALB)** receives public user traffic on Port 80 and forwards it to the private EC2 instance.
-* The application connects directly to the target **Amazon RDS PostgreSQL** database deployed in Stage 3.
-* Video streaming and movie poster assets are delivered through the **Amazon CloudFront CDN** deployed in Stage 4.
+Instead, enterprise migrations leverage **AWS Application Migration Service (AWS MGN)** (formerly CloudEndure Migration), the native AWS technology for non-disruptive, block-level server rehosting:
+
+1. **Continuous Block-Level Replication**: The lightweight **AWS Replication Agent** is installed on the source server (`APP01` at `10.10.10.20` running on Azure KVM). It captures every disk write at the block level on `/dev/vda` and streams it over the encrypted **IPsec Site-to-Site VPN** (`10.10.0.0/16 <-> 10.20.0.0/16`) to a dedicated Replication Server inside the private staging subnet.
+2. **Zero Downtime During Replication**: The source server remains 100% online and actively serves users during the entire synchronization process.
+3. **Automated Kernel Driver Conversion**: AWS MGN automatically launches a temporary **Conversion Server** that attaches snapshot volumes, injects native AWS hypervisor drivers (ENA networking, NVMe storage, and Xen), configures bootloaders (`grub`), and creates an Amazon Machine Image (AMI).
+4. **Non-Disruptive Pre-Cutover Testing (MAP Best Practice)**: AWS MGN launches a **Test Instance** inside your private application subnet (`10.20.10.0/24`). You can thoroughly validate application health, database queries to RDS, and CloudFront CDN media delivery without stopping replication or affecting on-premises operations.
+5. **Final Production Cutover**: Once testing passes, you launch the **Cutover Instance**, finalize the migration, and register the instance with an **Application Load Balancer (ALB)** deployed in public subnets (`10.20.1.0/24` and `10.20.2.0/24`).
 
 ```
-+--------------------------------------------------------------------------------------------------------------------------+
-| INTERNET CLIENTS & BROWSERS                                                                                              |
-+--------------------------------------------------------------------------------------------------------------------------+
-                                          |
-                                          | HTTP (Port 80)
-                                          v
-+--------------------------------------------------------------------------------------------------------------------------+
-| TARGET AWS LANDING ZONE: VPC vpc-020d6b01e57048985 (10.20.0.0/16)                                                        |
-|                                                                                                                          |
-|  [Application Load Balancer: streamflix-alb]                                                                             |
-|  Public Subnets: subnet-048d1aa28e96df5fe (10.20.1.0/24) & subnet-0928d6d5c54f3d2a5 (10.20.2.0/24)                      |
-|  Security Group: streamflix-alb-sg (Allows Inbound Port 80 from 0.0.0.0/0)                                              |
-|                                                                                                                          |
-|         | Forward Port 80                                                                                                |
-|         v                                                                                                                |
-|  [Target Group: streamflix-tg-app-ec2] (Port 80, Health Check: /api/health)                                              |
-|         |                                                                                                                |
-|         v                                                                                                                |
-| +-------+--------------------------------------------------------------------------------------------------------------+ |
-| | PRIVATE APPLICATION SUBNET (subnet-0f94155d4f2a9ffda: 10.20.10.0/24 - us-east-1a):                                  | |
-| | Security Group: streamflix-target-app-sg (Allows Port 80 from ALB, Port 22 from On-Prem VPN)                          | |
-| |                                                                                                                      | |
-| |  [Amazon EC2 Instance: streamflix-app-ec2]                                                                            | |
-| |   * OS: Ubuntu 24.04 LTS (t3.micro)                                                                                  | |
-| |   * Private IP: 10.20.10.x                                                                                           | |
-| |   * Nginx Reverse Proxy (Port 80): Serves React Frontend (/var/www/streamflix/frontend/dist)                          | |
-| |   * Express.js API (Port 5000): Managed via systemd (streamflix.service)                                              | |
-| |   * Environment (.env): Points to Target RDS Endpoint & CloudFront Domain                                            | |
-| |                                                                                                                      | |
-| +-------+--------------------------------------------------------------------+-----------------------------------------+ |
-|         |                                                                    |                                           |
-|         | SQL Queries (Port 5432)                                            | Media Streaming (HTTPS)                   |
-|         v                                                                    v                                           |
-|  [Target Amazon RDS PostgreSQL 16]                                    [Amazon CloudFront CDN / S3]                       |
-|  (streamflix-target-db in Isolated DB Subnet)                         (streamflix-media-165772574557)                    |
-+--------------------------------------------------------------------------------------------------------------------------+
++------------------------------------------------------------------------------------------------------------------------------------+
+| ON-PREMISES DATACENTER (AZURE KVM)                                  | TARGET MIGRATION LANDING ZONE (AWS us-east-1)                 |
+| Hypervisor: HV01 (172.173.122.68)                                   | VPC: vpc-0eacb09847d857983 (10.20.0.0/16)                     |
+|                                                                     |                                                              |
+| +-----------------------------------------------------------------+ | +----------------------------------------------------------+ |
+| | Source VM: APP01 (10.10.10.20 on virbr10)                       | | | PUBLIC WEB / ALB SUBNETS:                                | |
+| |  * OS: Ubuntu 24.04 LTS (x86_64)                                | | |  subnet-0f17c60078c74fc05 (10.20.1.0/24 - 1a)        | |
+| |  * Disk: /dev/vda (30 GiB Root Volume)                          | | |  subnet-018c04fd8f2edcd6e (10.20.2.0/24 - 1b)        | |
+| |  * Stack: React Dist + Nginx (Port 80), Express API (Port 5000)  | | |                                                          | |
+| |  * [AWS Replication Agent]                                      | | |  [Application Load Balancer: streamflix-alb]             | |
+| +--------+--------------------------------------------------------+ | |  Security Group: streamflix-alb-sg (Port 80 from 0.0.0.0/0) |
+|          |                                                          | +-------+--------------------------------------------------+ |
+|          | Block-Level Stream (TCP 1500)                            |         |                                                    |
+|          v                                                          |         | Forward HTTP (Port 80)                             |
+|   [StrongSwan IPsec Daemon]                                         |         v                                                    |
+|     (HV01 Hypervisor)                                               |  [Target Group: streamflix-tg-app-ec2] (/api/health)        |
+|          |                                                          |         |                                                    |
+|          +==========================================================+=========+====================================================+
+|                               Encrypted IPsec VPN Bridge                                                                           |
+|                               Route: 10.10.0.0/16 <-> 10.20.0.0/16                                                                 |
+|                                                                                                                                    |
+|                                                                     | +----------------------------------------------------------+ |
+|                                                                     | | PRIVATE STAGING SUBNET (subnet-094426acfea458e5c - 1a):   | |
+|                                                                     | |  * Security Group: sg-0c7841ad581251d1d (Port 1500 In)   | |
+|                                                                     | |  * Data Plane Routing: PRIVATE_IP                        | |
+|                                                                     | |  * [Replication Server: t3.micro + gp3 Staging EBS]       | |
+|                                                                     | +-------+--------------------------------------------------+ |
+|                                                                     |         |                                                    |
+|                                                                     |         | Automated Conversion & Driver Injection            |
+|                                                                     |         v                                                    |
+|                                                                     |  [AWS MGN Conversion Server]                                 |
+|                                                                     |         |                                                    |
+|                                                                     |         v                                                    |
+|                                                                     | +----------------------------------------------------------+ |
+|                                                                     | | TARGET PRIVATE APP SUBNET (subnet-094426acfea458e5c):     | |
+|                                                                     | |                                                          | |
+|                                                                     | |  [Migrated Production EC2 Instance: streamflix-app-ec2]  | |
+|                                                                     | |   * Converted from KVM /dev/vda to AWS NVMe EBS Root     | |
+|                                                                     | |   * Private IP: 10.20.10.x (No Public IP)                | |
+|                                                                     | |   * Security Group: streamflix-target-app-sg             | |
+|                                                                     | |   * Native Nginx + Express systemd service running       | |
+|                                                                     | +-------+----------------------------+---------------------+ |
+|                                                                     |         |                            |                       |
++---------------------------------------------------------------------+---------|----------------------------|-----------------------+
+                                                                                | SQL (Port 5432)            | Media Assets (HTTPS)
+                                                                                v                            v
+                                                      +-----------------------------------+        +-----------------------------------+
+                                                      | Target Amazon RDS PostgreSQL 16   |        | Amazon CloudFront CDN / S3 Bucket |
+                                                      | streamflix-target-db.cy9mak0su1oj |        | d1u8bkpbx2mtpm.cloudfront.net     |
+                                                      | (streamflix-target-db-isolated-1a)|        | (streamflix-media-165772574557)   |
+                                                      +-----------------------------------+        +-----------------------------------+
+```
+
+---
+
+### Migration Lifecycle Stages
+
+```
+ +---------------------------------------------------------------------------------------------------+
+ | 1. Initialize AWS MGN        2. Agent Installation      3. Continuous Replication                 |
+ | Configure Replication        Download installer on      Initial Sync 0% -> 100%                   |
+ | Template (PRIVATE_IP)        APP01; register with AWS   Continuous block updates (Lag: 0s)        |
+ +--------------------+-------------------+-----------------------------------+----------------------+
+                      |                   |                                   |
+                      v                   v                                   v
+ +---------------------------------------------------------------------------------------------------+
+ | 4. Launch Test Instance      5. Validate Test VM        6. Cutover to Production EC2              |
+ | Conversion server injects    Confirm /api/health &      Launch production EC2; finalize cutover;  |
+ | NVMe/ENA drivers & boots EC2 /api/movies via VPN        register with ALB for public traffic      |
+ +---------------------------------------------------------------------------------------------------+
 ```
 
 ---
@@ -64,266 +99,347 @@ This follows the classic enterprise **Lift-and-Shift / Replatform (IaaS)** migra
 | Component | Parameter | Value | Description |
 | :--- | :--- | :--- | :--- |
 | **AWS Region** | Region Name | `us-east-1` | Target AWS Cloud Region |
-| **Target VPC ID** | VPC ID | `vpc-020d6b01e57048985` | StreamFlix Landing Zone VPC (`10.20.0.0/16`) |
-| **Public Subnets (ALB)**| Subnet 1a / 1b | `subnet-048d1aa28e96df5fe` / `subnet-0928d6d5c54f3d2a5` | Internet-facing ALB subnets |
-| **Private App Subnet** | Subnet 1a | `subnet-0f94155d4f2a9ffda` (`10.20.10.0/24`) | Isolated private subnet for EC2 |
-| **EC2 Instance Name** | Tag Name | `streamflix-app-ec2` | Target application server |
-| **EC2 Instance Type** | Instance Class | `t3.micro` | Cost-effective / Free tier eligible |
-| **EC2 Operating System**| AMI | Ubuntu 24.04 LTS (64-bit x86) | Matches on-premises `APP01` |
-| **App Security Group** | Group ID | `sg-075c2521b1372d1a5` | Name: `streamflix-target-app-sg` |
-| **ALB Security Group** | Group Name | `streamflix-alb-sg` | Inbound Port 80 from `0.0.0.0/0` |
-| **Target Group Name** | Target Group | `streamflix-tg-app-ec2` | Target type: `instance`, Port 80, `/api/health` |
-| **Load Balancer Name** | ALB Name | `streamflix-alb` | Internet-facing Application Load Balancer |
+| **Target VPC ID** | VPC ID | `vpc-0eacb09847d857983` | StreamFlix Landing Zone VPC (`10.20.0.0/16`) |
+| **Staging Subnet (MGN)**| Subnet ID | `subnet-094426acfea458e5c` | `streamflix-target-app-private-1a` (`10.20.10.0/24`) |
+| **Private App Subnets** | Subnet 1a / 1b | `subnet-094426acfea458e5c` / `subnet-0d7fc76b1b17050f0` | Target subnets for migrated EC2 workloads |
+| **Public Subnets (ALB)**| Subnet 1a / 1b | `subnet-0f17c60078c74fc05` / `subnet-018c04fd8f2edcd6e` | Public subnets for Application Load Balancer |
+| **App Security Group** | Group ID | `sg-0c7841ad581251d1d` | Name: `streamflix-target-app-sg` |
+| **DB Security Group** | Group ID | `sg-075c1320653bd7215` | Name: `streamflix-target-db-sg` |
+| **ALB Security Group** | Group Name | `streamflix-alb-sg` | Public ingress on Port 80 and 443 |
+| **Replication Template**| Template ID | `rct-308d988f0aeebc90d` | Configured with `dataPlaneRouting: PRIVATE_IP` |
+| **Replication Port** | TCP Port | `1500` | Inbound port for block data replication |
+| **IAM Installer User**| Username | `mgn-installer-user` | IAM user with `AWSApplicationMigrationAgentInstallationPolicy` |
+| **Target Instance Type**| Instance Class | `t3.micro` (or `t3.small`) | Compute size for target EC2 instance |
+| **Target Key Pair** | Key Name | `CloudForge` | SSH key pair for target EC2 access |
+| **Target Database** | RDS Endpoint | `streamflix-target-db.cy9mak0su1oj.us-east-1.rds.amazonaws.com` | Target PostgreSQL 16 database from Stage 3 |
+| **Target CDN** | CloudFront Domain | `d1u8bkpbx2mtpm.cloudfront.net` | Target Media CDN endpoint from Stage 4 |
+| **Target S3 Bucket** | Bucket Name | `streamflix-media-165772574557` | Target media origin bucket |
+| **Source Server** | Hostname / IP | `APP01` / `10.10.10.20` | On-premises Linux KVM VM on Azure |
+| **Source Hypervisor** | Hostname / IP | `HV01` / `172.173.122.68` | Azure-hosted KVM hypervisor host |
 
 ---
 
-## 2. Phase 1: Provision the Application EC2 Instance
+## 2. Phase 1: Initialize AWS Application Migration Service (AWS MGN)
 
-You will launch the Ubuntu 24.04 instance inside your **private application subnet** (`subnet-0f94155d4f2a9ffda`).
+Before installing the agent on the source server, AWS MGN must be initialized in `us-east-1` and configured with a **Replication Configuration Template** that routes all data plane traffic securely over the private IPsec VPN.
 
-### Step 1.1: Launch EC2 Instance via Console or CLI
+### Step 1.1: Verify Service Initialization & Service-Linked Roles
+
+AWS MGN requires the service-linked role `AWSServiceRoleForApplicationMigrationService` and the EC2 instance profiles `AWSApplicationMigrationConversionServerRole` and `AWSApplicationMigrationReplicationServerRole`.
 
 #### Option A: Via AWS Management Console (Click-by-Click UI)
-1. In the AWS Management Console search bar at the top, type **EC2** and click **EC2**.
-2. In the EC2 Dashboard, click the orange **Launch instance** button.
-3. **Name and tags**:
-   * Name: Enter `streamflix-app-ec2`.
-4. **Application and OS Images (Amazon Machine Image)**:
-   * Select **Ubuntu**.
-   * Amazon Machine Image (AMI): Choose **Ubuntu Server 24.04 LTS (HVM), SSD Volume Type** (64-bit x86).
-5. **Instance type**:
-   * Select **`t3.micro`** (or `t3.small`).
-6. **Key pair (login)**:
-   * Select an existing key pair, or click **Create new key pair** (e.g. `streamflix-key.pem`).
-7. **Network settings** *(Click "Edit" on the right)*:
-   * **VPC**: Select `streamflix-target-vpc` (`vpc-020d6b01e57048985`).
-   * **Subnet**: Select `subnet-0f94155d4f2a9ffda` (`streamflix-target-app-private-1a`).
-   * **Auto-assign public IP**: Select **Disable** *(Keeps the server securely isolated in private subnet)*.
-   * **Firewall (security groups)**: Choose **Select existing security group** $\to$ Select `streamflix-target-app-sg` (`sg-075c2521b1372d1a5`).
-8. **Configure storage**:
-   * Root volume: `20` GiB **General Purpose SSD (gp3)**.
-9. Click the orange **Launch instance** button.
-
----
+1. Open the AWS Management Console search bar, type **Application Migration Service**, and select it.
+2. If this is your first time in the region, click the orange **Get started** button. AWS will automatically create the required service-linked roles.
+3. If already initialized, you will be taken directly to the **Source servers** dashboard.
 
 #### Option B: Via AWS CLI Command
 ```bash
-# Retrieve latest Ubuntu 24.04 AMI ID
-AMI_ID=$(aws ec2 describe-images \
-  --owners 099720109477 \
-  --filters "Name=name,Values=ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*" \
-  --query 'sort_by(Images, &CreationDate)[-1].ImageId' \
-  --output text \
-  --region us-east-1)
+# Verify the service-linked role exists
+aws iam get-role --role-name AWSServiceRoleForApplicationMigrationService --query 'Role.Arn' --output text
 
-# Launch EC2 instance in private app subnet
-aws ec2 run-instances \
-  --image-id $AMI_ID \
-  --instance-type t3.micro \
-  --key-name CloudForge \
-  --subnet-id subnet-0f94155d4f2a9ffda \
-  --security-group-ids sg-075c2521b1372d1a5 \
-  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=streamflix-app-ec2}]' \
-  --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":20,"VolumeType":"gp3"}}]' \
+# If not present, create it
+aws iam create-service-linked-role --aws-service-name mgn.amazonaws.com
+```
+
+---
+
+### Step 1.2: Configure Replication Settings Template (`PRIVATE_IP` Routing)
+
+> [!IMPORTANT]
+> By default, AWS MGN routes replication data over the public internet. Because our architecture features an enterprise **Site-to-Site IPsec VPN** (`10.10.0.0/16 <-> 10.20.0.0/16`), we must set **Data routing** to **Use private IP**. This ensures all disk blocks travel through the encrypted VPN tunnel directly into your private staging subnet without requiring public IPs or internet gateways for replication!
+
+#### Option A: Via AWS Management Console (Click-by-Click UI)
+1. In the AWS MGN left navigation pane, click **Settings** $\to$ Click the **Replication template** tab.
+2. Click **Edit** (or create template if not present).
+3. Configure the parameters:
+   * **Staging area subnets**:
+     * VPC: Select `streamflix-target-vpc` (`vpc-0eacb09847d857983`).
+     * Subnet: Select `streamflix-target-app-private-1a` (`subnet-094426acfea458e5c`).
+   * **Replication Servers security group**:
+     * Select `streamflix-target-app-sg` (`sg-0c7841ad581251d1d`).
+   * **Replication Server instance type**:
+     * Select **`t3.micro`** (cost-effective).
+   * **Staging disk type**:
+     * Select **Standard (gp3)**.
+   * **Data routing**:
+     * Select **Use private IP (VPN, DirectConnect, or VPC peering)**.
+   * **Bandwidth throttling**: `0` (disabled/unlimited).
+4. Click **Save template**.
+
+#### Option B: Via AWS CLI Command
+```bash
+# Update existing replication template rct-308d988f0aeebc90d
+aws mgn update-replication-configuration-template \
+  --replication-configuration-template-id rct-308d988f0aeebc90d \
+  --staging-area-subnet-id subnet-094426acfea458e5c \
+  --replication-servers-security-groups-ids sg-0c7841ad581251d1d \
+  --replication-server-instance-type t3.micro \
+  --default-large-staging-disk-type GP3 \
+  --data-plane-routing PRIVATE_IP \
   --region us-east-1
 ```
 
 ---
 
-### Step 1.2: Retrieve the Private IP of the EC2 Instance
-Wait until the instance is in the `running` state and note its private IP:
+### Step 1.3: Verify Security Group Inbound TCP Port 1500
+
+The Replication Server in `subnet-094426acfea458e5c` listens on **TCP Port 1500** for block data transmitted by the agent on `APP01` (`10.10.10.20`). Ensure this port is open to the on-premises subnet:
 
 ```bash
-EC2_PRIVATE_IP=$(aws ec2 describe-instances \
-  --filters "Name=tag:Name,Values=streamflix-app-ec2" "Name=instance-state-name,Values=running" \
-  --query 'Reservations[0].Instances[0].PrivateIpAddress' \
-  --output text \
-  --region us-east-1)
-
-echo "EC2 Private IP: $EC2_PRIVATE_IP"
-```
-*(The private IP will be in the `10.20.10.x` range).*
-
----
-
-### Step 1.3: Verify Cross-Cloud Reachability from On-Premises
-Because your IPsec Site-to-Site VPN is active (`10.10.0.0/16 <-> 10.20.0.0/16`), you can **ping and SSH directly into the private EC2 instance from HV01**:
-
-From `HV01`:
-```bash
-# Ping the new private EC2 instance over the IPsec VPN tunnel
-ping -c 3 $EC2_PRIVATE_IP
-```
-*Expected: 0% packet loss!*
-
----
-
-## 3. Phase 2: Deploy & Configure StreamFlix on EC2
-
-Now connect to the EC2 instance and install the application dependencies, Nginx reverse proxy, and systemd service.
-
-### Step 2.1: SSH into the Private EC2 Instance from HV01
-From your **`HV01`** terminal (or using your key):
-
-```bash
-ssh -i /home/labadmin/CloudForge.pem ubuntu@$EC2_PRIVATE_IP
+# Authorize inbound TCP 1500 on streamflix-target-app-sg from on-prem CIDR
+aws ec2 authorize-security-group-ingress \
+  --group-id sg-0c7841ad581251d1d \
+  --protocol tcp \
+  --port 1500 \
+  --cidr 10.10.0.0/16 \
+  --region us-east-1 2>/dev/null || true
 ```
 
 ---
 
-### Step 2.2: Install Node.js 18, NPM, and Nginx
-Inside the **`streamflix-app-ec2`** instance:
+### Step 1.4: Configure Launch Template Settings for Target EC2
+
+AWS MGN uses an EC2 Launch Template to control how test and cutover instances are launched:
+
+1. In the AWS MGN left navigation, click **Settings** $\to$ Click the **Launch template** tab.
+2. Click **Modify launch template**:
+   * **Instance type**: `t3.micro` (or `t3.small`).
+   * **Key pair**: `CloudForge`.
+   * **Network settings**:
+     * Subnet: `streamflix-target-app-private-1a` (`subnet-094426acfea458e5c`).
+     * Security groups: `streamflix-target-app-sg` (`sg-0c7841ad581251d1d`).
+     * Auto-assign public IP: **Disable** (enforcing private subnet isolation).
+3. Click **Save launch template**.
+
+---
+
+## 3. Phase 2: Create Agent Installation IAM Credentials
+
+The AWS Replication Agent running on `APP01` must authenticate to AWS MGN endpoints to register the server and coordinate block transfers.
+
+### Step 2.1: Verify Dedicated IAM User `mgn-installer-user`
+
+The IAM user must have the AWS-managed policy `AWSApplicationMigrationAgentInstallationPolicy` attached.
 
 ```bash
-# Update package repositories
-sudo apt update && sudo apt upgrade -y
+# Verify policy attachment
+aws iam list-attached-user-policies --user-name mgn-installer-user
+```
+*Expected: `PolicyArn: arn:aws:iam::aws:policy/AWSApplicationMigrationAgentInstallationPolicy`*
 
-# Install Node.js 18 LTS and Nginx
-curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
-sudo apt install -y nodejs nginx jq git
+---
 
-# Verify installations
-node -v
-npm -v
-nginx -v
+### Step 2.2: Generate Access Key for Agent Installation
+
+#### Option A: Via AWS Management Console (Click-by-Click UI)
+1. In the AWS Console, search for **IAM** $\to$ Click **Users** in the left menu.
+2. Click on **`mgn-installer-user`**.
+3. Click the **Security credentials** tab.
+4. Scroll to **Access keys** $\to$ Click **Create access key**.
+5. Select **Application running outside AWS** $\to$ Click **Next**.
+6. Set Description: `MGN-Agent-Installation-APP01` $\to$ Click **Create access key**.
+7. Copy both the **Access Key ID** and **Secret Access Key** (save them in a secure temporary buffer).
+
+#### Option B: Via AWS CLI Command
+```bash
+# Generate access key pair
+aws iam create-access-key \
+  --user-name mgn-installer-user \
+  --query 'AccessKey.{AccessKeyId:AccessKeyId,SecretAccessKey:SecretAccessKey}' \
+  --output table
 ```
 
 ---
 
-### Step 2.3: Deploy StreamFlix Application Source Code
-Create the application directory structure:
+## 4. Phase 3: Install AWS Replication Agent on APP01
+
+Now connect to `APP01` on Azure, download the official AWS Replication Agent installer, and register `APP01` with AWS MGN.
+
+### Step 3.1: Connect to APP01 from HV01
+
+From your workstation or Azure hypervisor `HV01` (`172.173.122.68`):
 
 ```bash
-sudo mkdir -p /var/www/streamflix
-sudo chown -R ubuntu:ubuntu /var/www/streamflix
-```
-
-Copy the application source from `APP01` (or clone the repository):
-
-```bash
-# From inside the EC2 instance, copy directly from on-prem APP01 over the VPN:
-scp -r vagrant@10.10.10.20:/var/www/streamflix/frontend /var/www/streamflix/
-scp -r vagrant@10.10.10.20:/var/www/streamflix/backend /var/www/streamflix/
-```
-*(Password for vagrant: `vagrant`)*.
-
----
-
-### Step 2.4: Build React Frontend & Install Backend Dependencies
-1. **Build the React Frontend bundle**:
-   ```bash
-   cd /var/www/streamflix/frontend
-   npm install
-   npm run build
-   ```
-   *Verify that `/var/www/streamflix/frontend/dist` is populated with `index.html` and assets.*
-
-2. **Install Backend API production dependencies**:
-   ```bash
-   cd /var/www/streamflix/backend
-   npm install --omit=dev
-   ```
-
----
-
-### Step 2.5: Configure Backend Environment Variables
-Create `/var/www/streamflix/backend/.env` pointing to your **Amazon RDS Endpoint** (from Stage 3) and **Amazon CloudFront Domain** (from Stage 4):
-
-```bash
-cat << 'EOF' | sudo tee /var/www/streamflix/backend/.env
-PORT=5000
-DB_HOST=<YOUR_RDS_ENDPOINT>
-DB_PORT=5432
-DB_NAME=streamflix_db
-DB_USER=streamflix_user
-DB_PASSWORD=StreamFlixPass2026!
-MEDIA_BASE_URL=https://<YOUR_CLOUDFRONT_DOMAIN>
-EOF
+# SSH into APP01 from HV01
+ssh vagrant@10.10.10.20
+# (Password: vagrant)
 ```
 
 ---
 
-### Step 2.6: Configure Systemd Service for Express API
-Create a persistent systemd service so the Node.js API runs continuously and restarts automatically on reboot:
+### Step 3.2: Verify Pre-Requisites on APP01
+
+Inside `APP01`, verify Python 3 and disk layout:
 
 ```bash
-cat << 'EOF' | sudo tee /etc/systemd/system/streamflix.service
-[Unit]
-Description=StreamFlix Node.js REST API
-After=network.target
+# 1. Verify Python 3
+python3 --version
 
-[Service]
-Type=simple
-User=ubuntu
-WorkingDirectory=/var/www/streamflix/backend
-EnvironmentFile=-/var/www/streamflix/backend/.env
-ExecStart=/usr/bin/node /var/www/streamflix/backend/server.js
-Restart=always
-RestartSec=5
-Environment=NODE_ENV=production
+# 2. Inspect root disk to be replicated
+lsblk -f
+```
+*Notice `/dev/vda` is the root disk (`30G`), formatted as `ext4` with `/` mounted.*
 
-[Install]
-WantedBy=multi-user.target
-EOF
+---
 
-# Reload systemd, enable and start service
-sudo systemctl daemon-reload
-sudo systemctl enable streamflix
-sudo systemctl start streamflix
-sudo systemctl status streamflix --no-pager
+### Step 3.3: Download the AWS Replication Agent Installer
+
+Download the official AWS Replication Agent installer script directly to `APP01`:
+
+```bash
+wget -O ./aws-replication-installer-init.py https://aws-application-migration-service-us-east-1.s3.us-east-1.amazonaws.com/latest/linux/aws-replication-installer-init.py
 ```
 
 ---
 
-### Step 2.7: Configure Nginx Reverse Proxy
-Configure Nginx to serve the React frontend static build and reverse proxy `/api/*` to the Node.js process:
+### Step 3.4: Run the Agent Installer
 
+You can run the installer interactively or non-interactively using CLI flags.
+
+#### Method 1: Non-Interactive (Recommended for Automation)
 ```bash
-cat << 'EOF' | sudo tee /etc/nginx/sites-available/streamflix
-server {
-    listen 80 default_server;
-    listen [::]:80 default_server;
-    server_name _;
+sudo python3 aws-replication-installer-init.py \
+  --region us-east-1 \
+  --aws-access-key-id <YOUR_AWS_ACCESS_KEY_ID> \
+  --aws-secret-access-key <YOUR_AWS_SECRET_ACCESS_KEY> \
+  --no-prompt
+```
 
-    # 1. React Frontend Static Build
-    location / {
-        root /var/www/streamflix/frontend/dist;
-        index index.html index.htm;
-        try_files $uri $uri/ /index.html;
-    }
+#### Method 2: Interactive Prompt
+```bash
+sudo python3 aws-replication-installer-init.py
+```
+When prompted:
+1. **AWS Region Name**: Enter `us-east-1`.
+2. **AWS Access Key ID**: Paste your Access Key ID.
+3. **AWS Secret Access Key**: Paste your Secret Access Key.
+4. **Choose disks to replicate**: Press **Enter** to replicate all disks (`/dev/vda`).
 
-    # 2. Node.js Express API Reverse Proxy
-    location /api/ {
-        proxy_pass http://127.0.0.1:5000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_cache_bypass $http_upgrade;
-    }
-}
-EOF
+**Expected Installer Output:**
+```text
+The Installation_ID is: c1a8e992-4f12-4d22-9d33-9114f828a211.
+Identified volumes for replication: /dev/vda of size 30 GiB
+All volumes for replication were successfully mapped to AWS.
+Replication Agent was successfully installed.
+```
 
-# Enable configuration and test syntax
-sudo rm -f /etc/nginx/sites-enabled/default
-sudo ln -sf /etc/nginx/sites-available/streamflix /etc/nginx/sites-enabled/
-sudo nginx -t
-sudo systemctl restart nginx
+Exit `APP01`:
+```bash
+exit
 ```
 
 ---
 
-### Step 2.8: Test Local Health & Catalog on EC2
-From inside the EC2 instance, test both endpoints:
+## 5. Phase 4: Monitor Continuous Block-Level Replication
+
+As soon as the agent installer finishes, `APP01` automatically registers with AWS MGN and triggers staging infrastructure creation in AWS!
+
+### Step 4.1: View Source Server in AWS Console
+
+1. In the AWS Management Console, open **Application Migration Service**.
+2. In the left navigation menu, click **Source servers**.
+3. You will see **`APP01`** (or its IP `10.10.10.20`) in the list!
+4. Click on the server name to open its real-time replication dashboard.
+
+---
+
+### Step 4.2: Track Replication Stages
+
+In the **Data replication status** panel, AWS MGN automatically progresses through the following states:
+
+```
+[1. Discovered]
+      |
+      v
+[2. Creating replication server] ----> Launches t3.micro in subnet-094426acfea458e5c
+      |
+      v
+[3. Initial Sync (0% -> 100%)]   ----> Copies 30 GiB block volume over IPsec VPN (TCP 1500)
+      |
+      v
+[4. Continuous Data Replication] ----> Lag: 0 seconds | Status: Healthy
+      |
+      v
+[5. Ready for testing]           ----> Lifecycle status turns green!
+```
+
+* **Initial Sync**: Takes approximately 10 to 15 minutes over the Site-to-Site VPN for a 30 GiB volume with ~3 GiB used data.
+* **Continuous Data Replication**: Once 100% synchronized, any change written on `APP01` is replicated in near real-time (Lag: 0s).
+* **Lifecycle State**: Automatically transitions to **`Ready for testing`**.
+
+#### Verify via AWS CLI:
+```bash
+aws mgn describe-source-servers \
+  --region us-east-1 \
+  --query 'items[*].{ID:sourceServerID,Hostname:sourceProperties.os.rawOSDescription,DataSync:dataReplicationInfo.dataReplicationState,Lag:dataReplicationInfo.lagDuration,LifeCycle:lifeCycle.state}' \
+  --output table
+```
+
+---
+
+## 6. Phase 5: Launch & Validate Test Instance (MAP Best Practice)
+
+In enterprise migrations adhering to the **AWS Migration Acceleration Program (MAP)** framework, launching a **Test Instance** is a mandatory gate before production cutover. 
+
+This test verifies that:
+* The automated conversion server properly injected AWS NVMe/ENA kernel drivers.
+* Ubuntu 24.04 boots natively on AWS hardware.
+* Nginx and the Node.js Express service start automatically on boot.
+* PostgreSQL queries connect successfully to Amazon RDS over the private subnet.
+* Source replication continues in the background with zero impact!
+
+---
+
+### Step 5.1: Launch Test Instance
+
+#### Option A: Via AWS Management Console (Click-by-Click UI)
+1. In the AWS MGN Console $\to$ **Source servers** $\to$ Check the box next to **`APP01`**.
+2. Click the **Test and cutover** button at the top right $\to$ Click **Launch test instances**.
+3. In the confirmation dialog, click **Launch**.
+4. The Lifecycle status changes to **`Test in progress`**.
+
+#### Option B: Via AWS CLI Command
+```bash
+# Retrieve APP01 Source Server ID
+SOURCE_SERVER_ID=$(aws mgn describe-source-servers \
+  --region us-east-1 \
+  --query 'items[0].sourceServerID' \
+  --output text)
+
+# Launch test instance
+aws mgn launch-test-instances \
+  --source-server-ids $SOURCE_SERVER_ID \
+  --region us-east-1
+```
+
+---
+
+### Step 5.2: Monitor Automated Conversion & EC2 Launch
+
+Click the **Alerts and activities** tab on the server details page to observe AWS MGN performing:
+1. Snapshot generation of staging EBS volumes.
+2. Spin-up of the **AWS Conversion Server**.
+3. Driver injection (NVMe, ENA) into the Ubuntu kernel.
+4. Creation of the converted target AMI.
+5. Launch of the EC2 instance named **`APP01 - Test`** in `subnet-094426acfea458e5c`.
+
+---
+
+### Step 5.3: Verify Test EC2 Instance Reachability & Application Health
+
+1. In the AWS Console, open **Amazon EC2** $\to$ Click **Instances**.
+2. Find the instance named **`APP01 - Test`** and copy its **Private IP address** (e.g. `10.20.10.x`).
+3. From **`HV01`**, test connectivity over the IPsec VPN:
 
 ```bash
-# 1. Test Health endpoint
-curl -s http://localhost/api/health | jq .
+# Set test IP variable
+TEST_IP="<TEST_INSTANCE_PRIVATE_IP>"
 
-# 2. Test Movies catalog endpoint
-curl -s http://localhost/api/movies | jq .
+# 1. Ping the test instance over IPsec VPN
+ping -c 3 $TEST_IP
+
+# 2. Test StreamFlix API Health
+curl -s http://$TEST_IP/api/health | jq .
 ```
 
 **Expected Health Output:**
@@ -333,63 +449,177 @@ curl -s http://localhost/api/movies | jq .
   "service": "StreamFlix API",
   "host": "APP01",
   "database": "CONNECTED",
-  "timestamp": "2026-11-04T..."
+  "timestamp": "2026-11-16T..."
 }
 ```
 
-Exit the EC2 instance:
 ```bash
-exit
+# 3. Test Movies Catalog
+curl -s http://$TEST_IP/api/movies | jq .
+```
+*Expected: Returns all movies (Inception, The Dark Knight, Interstellar, The Matrix Resurrections) queried from RDS PostgreSQL!*
+
+---
+
+### Step 5.4: Mark as "Ready for Cutover" & Terminate Test Instance
+
+Once testing is validated:
+
+#### Option A: Via AWS Management Console (Click-by-Click UI)
+1. In AWS MGN $\to$ **Source servers** $\to$ Select **`APP01`**.
+2. Click **Test and cutover** $\to$ Click **Mark as "Ready for cutover"**.
+3. Check the confirmation checkbox $\to$ Click **Continue**.
+4. In the cleanup dialog, select **Yes, terminate test instance** *(AWS automatically deletes the test instance to avoid unnecessary compute charges)*.
+5. The Lifecycle state changes to **`Ready for cutover`**!
+
+#### Option B: Via AWS CLI Command
+```bash
+# Mark as ready for cutover
+aws mgn mark-as-ready-for-cutover \
+  --source-server-id $SOURCE_SERVER_ID \
+  --region us-east-1
+
+# Terminate the test instance
+TEST_INSTANCE_ID=$(aws ec2 describe-instances \
+  --filters "Name=tag:Name,Values=*Test*" "Name=instance-state-name,Values=running" \
+  --query 'Reservations[0].Instances[0].InstanceId' \
+  --output text \
+  --region us-east-1)
+
+if [ "$TEST_INSTANCE_ID" != "None" ]; then
+  aws ec2 terminate-instances --instance-ids $TEST_INSTANCE_ID --region us-east-1
+fi
 ```
 
 ---
 
-## 4. Phase 3: Application Load Balancer (ALB) Setup (UI Console & CLI)
+## 7. Phase 6: Execute Cutover to Production EC2
 
-Now we deploy an **Application Load Balancer** in the public subnets to route incoming internet traffic to port 80 of your private EC2 instance.
+Now perform the final cutover during your scheduled maintenance window.
 
-### Step 3.1: Create ALB Security Group
+### Step 6.1: Launch Cutover Instance
+
+#### Option A: Via AWS Management Console (Click-by-Click UI)
+1. In the AWS MGN Console $\to$ **Source servers** $\to$ Select **`APP01`**.
+2. Click **Test and cutover** $\to$ Click **Launch cutover instances**.
+3. In the confirmation dialog, click **Launch**.
+4. AWS will take the final differential snapshot, apply last-second block updates, convert the volume, and boot your final **Production EC2 Instance**!
+
+#### Option B: Via AWS CLI Command
+```bash
+aws mgn launch-cutover-instances \
+  --source-server-ids $SOURCE_SERVER_ID \
+  --region us-east-1
+```
+
+---
+
+### Step 6.2: Retrieve Production EC2 Instance ID and Private IP
+
+Wait until the cutover instance is running:
+
+```bash
+# Retrieve Cutover Instance ID and Private IP
+CUTOVER_INSTANCE_ID=$(aws ec2 describe-instances \
+  --filters "Name=tag:Name,Values=*Cutover*" "Name=instance-state-name,Values=running" \
+  --query 'Reservations[0].Instances[0].InstanceId' \
+  --output text \
+  --region us-east-1)
+
+CUTOVER_PRIVATE_IP=$(aws ec2 describe-instances \
+  --instance-ids $CUTOVER_INSTANCE_ID \
+  --query 'Reservations[0].Instances[0].PrivateIpAddress' \
+  --output text \
+  --region us-east-1)
+
+echo "Cutover EC2 Instance ID: $CUTOVER_INSTANCE_ID"
+echo "Cutover EC2 Private IP:  $CUTOVER_PRIVATE_IP"
+
+# Tag the instance cleanly as streamflix-app-ec2
+aws ec2 create-tags \
+  --resources $CUTOVER_INSTANCE_ID \
+  --tags Key=Name,Value=streamflix-app-ec2 Key=Environment,Value=Production Key=Project,Value=StreamFlix \
+  --region us-east-1
+```
+
+---
+
+### Step 6.3: Finalize Cutover
+
+Once the cutover instance is validated:
+
+#### Option A: Via AWS Management Console (Click-by-Click UI)
+1. In AWS MGN $\to$ **Source servers** $\to$ Select **`APP01`**.
+2. Click **Test and cutover** $\to$ Click **Finalize cutover**.
+3. Confirm by clicking **Finalize**.
+
+#### Option B: Via AWS CLI Command
+```bash
+aws mgn finalize-cutover \
+  --source-server-id $SOURCE_SERVER_ID \
+  --region us-east-1
+```
+
+**What Finalize Cutover does:**
+* Transitions the server Lifecycle state to **`Cutover complete`**.
+* Automatically terminates the replication server and deletes staging EBS volumes, **stopping ongoing replication costs**.
+* Permanently decouples the target EC2 instance as an independent production server.
+
+---
+
+## 8. Phase 7: Application Load Balancer (ALB) Setup & Production Target Registration
+
+To make the private EC2 instance accessible to end users, deploy an internet-facing **Application Load Balancer** in your public subnets (`subnet-0f17c60078c74fc05` and `subnet-018c04fd8f2edcd6e`) and register the migrated EC2 instance.
+
+### Step 7.1: Create ALB Security Group
 
 #### Option A: Via AWS Management Console (Click-by-Click UI)
 1. In the AWS Console, search for **VPC** $\to$ Click **Security groups** in the left menu.
-2. Click the orange **Create security group** button.
-3. **Basic details**:
-   * Security group name: `streamflix-alb-sg`.
-   * Description: `Security group for public StreamFlix ALB`.
-   * VPC: Select `streamflix-target-vpc` (`vpc-020d6b01e57048985`).
-4. **Inbound rules**:
-   * Click **Add rule**:
-     * Type: **HTTP** | Port: `80` | Source: `Anywhere-IPv4` (`0.0.0.0/0`).
-   * Click **Add rule**:
-     * Type: **HTTPS** | Port: `443` | Source: `Anywhere-IPv4` (`0.0.0.0/0`).
-5. Click **Create security group**.
+2. Click **Create security group**:
+   * **Security group name**: `streamflix-alb-sg`.
+   * **Description**: `Security group for public StreamFlix Application Load Balancer`.
+   * **VPC**: Select `streamflix-target-vpc` (`vpc-0eacb09847d857983`).
+   * **Inbound rules**:
+     * Rule 1: Type: **HTTP** | Port: `80` | Source: `Anywhere-IPv4` (`0.0.0.0/0`).
+     * Rule 2: Type: **HTTPS** | Port: `443` | Source: `Anywhere-IPv4` (`0.0.0.0/0`).
+3. Click **Create security group**.
 
 #### Option B: Via AWS CLI Command
 ```bash
 ALB_SG_ID=$(aws ec2 create-security-group \
   --group-name streamflix-alb-sg \
   --description "Security group for public StreamFlix ALB" \
-  --vpc-id vpc-020d6b01e57048985 \
+  --vpc-id vpc-0eacb09847d857983 \
   --query 'GroupId' \
   --output text \
   --region us-east-1)
 
+# Allow HTTP Port 80 from everywhere
 aws ec2 authorize-security-group-ingress \
   --group-id $ALB_SG_ID \
   --protocol tcp \
   --port 80 \
   --cidr 0.0.0.0/0 \
   --region us-east-1
+
+# Allow HTTPS Port 443 from everywhere
+aws ec2 authorize-security-group-ingress \
+  --group-id $ALB_SG_ID \
+  --protocol tcp \
+  --port 443 \
+  --cidr 0.0.0.0/0 \
+  --region us-east-1
 ```
 
 ---
 
-### Step 3.2: Allow Inbound Traffic from ALB to EC2 Security Group
-Ensure that `streamflix-target-app-sg` allows incoming HTTP (Port 80) traffic from the ALB security group:
+### Step 7.2: Authorize Inbound HTTP Traffic from ALB to App Security Group
+
+Ensure `streamflix-target-app-sg` (`sg-0c7841ad581251d1d`) permits HTTP Port 80 traffic originating from `streamflix-alb-sg`:
 
 ```bash
 aws ec2 authorize-security-group-ingress \
-  --group-id sg-075c2521b1372d1a5 \
+  --group-id sg-0c7841ad581251d1d \
   --protocol tcp \
   --port 80 \
   --source-group $ALB_SG_ID \
@@ -398,26 +628,24 @@ aws ec2 authorize-security-group-ingress \
 
 ---
 
-### Step 3.3: Create Target Group for EC2 Instance
+### Step 7.3: Create Target Group & Register Production EC2
 
 #### Option A: Via AWS Management Console (Click-by-Click UI)
 1. In the EC2 Console left navigation, scroll to **Load Balancing** $\to$ Click **Target Groups**.
-2. Click the orange **Create target group** button.
-3. **Basic configuration**:
-   * Choose a target type: Select **Instances** *(Targeting our EC2 VM)*.
-   * Target group name: Enter `streamflix-tg-app-ec2`.
-   * Protocol: **HTTP** | Port: `80`.
-   * IP address type: **IPv4**.
-   * VPC: Select `streamflix-target-vpc` (`vpc-020d6b01e57048985`).
-4. **Health checks**:
-   * Health check protocol: **HTTP**.
-   * Health check path: Enter `/api/health`.
-5. Click **Next**.
-6. **Register targets**:
-   * Select the checkbox next to **`streamflix-app-ec2`**.
-   * Port for selected instances: `80`.
-   * Click the white button: **Include as pending below**.
-7. Click the orange **Create target group** button.
+2. Click **Create target group**:
+   * **Target type**: Select **Instances**.
+   * **Target group name**: Enter `streamflix-tg-app-ec2`.
+   * **Protocol**: **HTTP** | **Port**: `80`.
+   * **VPC**: Select `streamflix-target-vpc` (`vpc-0eacb09847d857983`).
+   * **Health checks**:
+     * Health check protocol: **HTTP**.
+     * Health check path: Enter `/api/health`.
+3. Click **Next**.
+4. **Register targets**:
+   * Check the box next to your migrated production EC2 instance (`streamflix-app-ec2`).
+   * Port: `80`.
+   * Click **Include as pending below**.
+5. Click **Create target group**.
 
 #### Option B: Via AWS CLI Command
 ```bash
@@ -426,30 +654,26 @@ TG_APP_ARN=$(aws elbv2 create-target-group \
   --name streamflix-tg-app-ec2 \
   --protocol HTTP \
   --port 80 \
-  --vpc-id vpc-020d6b01e57048985 \
+  --vpc-id vpc-0eacb09847d857983 \
   --target-type instance \
   --health-check-path "/api/health" \
+  --health-check-interval-seconds 15 \
+  --healthy-threshold-count 2 \
+  --unhealthy-threshold-count 2 \
   --query 'TargetGroups[0].TargetGroupArn' \
   --output text \
   --region us-east-1)
 
-# 2. Get EC2 Instance ID
-EC2_INSTANCE_ID=$(aws ec2 describe-instances \
-  --filters "Name=tag:Name,Values=streamflix-app-ec2" "Name=instance-state-name,Values=running" \
-  --query 'Reservations[0].Instances[0].InstanceId' \
-  --output text \
-  --region us-east-1)
-
-# 3. Register EC2 Instance with Target Group
+# 2. Register Migrated EC2 Instance
 aws elbv2 register-targets \
   --target-group-arn $TG_APP_ARN \
-  --targets Id=$EC2_INSTANCE_ID,Port=80 \
+  --targets Id=$CUTOVER_INSTANCE_ID,Port=80 \
   --region us-east-1
 ```
 
 ---
 
-### Step 3.4: Create the Application Load Balancer
+### Step 7.4: Deploy Application Load Balancer
 
 #### Option A: Via AWS Management Console (Click-by-Click UI)
 1. In the EC2 Console left navigation, click **Load Balancers** $\to$ Click **Create load balancer**.
@@ -459,23 +683,23 @@ aws elbv2 register-targets \
    * Scheme: **Internet-facing**.
    * IP address type: **IPv4**.
 4. **Network mapping**:
-   * VPC: Select `streamflix-target-vpc` (`vpc-020d6b01e57048985`).
-   * Mappings (Select both public subnets):
-     * Zone `us-east-1a`: Check box $\to$ Select `subnet-048d1aa28e96df5fe` (`streamflix-target-public-1a`).
-     * Zone `us-east-1b`: Check box $\to$ Select `subnet-0928d6d5c54f3d2a5` (`streamflix-target-public-1b`).
+   * VPC: Select `streamflix-target-vpc` (`vpc-0eacb09847d857983`).
+   * Subnets (Select both public subnets):
+     * Zone `us-east-1a`: Select `subnet-0f17c60078c74fc05` (`streamflix-target-public-1a`).
+     * Zone `us-east-1b`: Select `subnet-018c04fd8f2edcd6e` (`streamflix-target-public-1b`).
 5. **Security groups**:
-   * Select `streamflix-alb-sg` $\to$ Remove `default`.
+   * Select `streamflix-alb-sg`.
 6. **Listeners and routing**:
    * Protocol: **HTTP** | Port: `80`.
    * Default action: Forward to **`streamflix-tg-app-ec2`**.
-7. Click the orange **Create load balancer** button at the bottom.
+7. Click **Create load balancer**.
 
 #### Option B: Via AWS CLI Command
 ```bash
-# 1. Create ALB
+# 1. Create Application Load Balancer
 ALB_ARN=$(aws elbv2 create-load-balancer \
   --name streamflix-alb \
-  --subnets subnet-048d1aa28e96df5fe subnet-0928d6d5c54f3d2a5 \
+  --subnets subnet-0f17c60078c74fc05 subnet-018c04fd8f2edcd6e \
   --security-groups $ALB_SG_ID \
   --scheme internet-facing \
   --type application \
@@ -483,7 +707,7 @@ ALB_ARN=$(aws elbv2 create-load-balancer \
   --output text \
   --region us-east-1)
 
-# 2. Create Listener forwarding Port 80 to streamflix-tg-app-ec2
+# 2. Create HTTP Port 80 Listener
 aws elbv2 create-listener \
   --load-balancer-arn $ALB_ARN \
   --protocol HTTP \
@@ -494,16 +718,29 @@ aws elbv2 create-listener \
 
 ---
 
-## 5. Phase 4: Live End-to-End Application Verification 🎬
+## 9. Phase 8: Live End-to-End Application Verification 🎬
 
-Now verify that the target group shows the EC2 instance as **healthy** and test the live application through the Application Load Balancer!
+Now verify that the Application Load Balancer routes traffic to the migrated EC2 instance and validates the full application stack!
 
-### Step 4.1: Retrieve the ALB Public DNS Name
-1. In the EC2 Console $\to$ **Load Balancers** $\to$ Click **`streamflix-alb`**.
-2. Copy the **DNS name** *(e.g. `streamflix-alb-123456789.us-east-1.elb.amazonaws.com`)*.
+### Step 8.1: Check Target Health in Target Group
 
-Or via CLI:
+Wait 30-45 seconds for initial health checks to complete:
+
 ```bash
+aws elbv2 describe-target-health \
+  --target-group-arn $TG_APP_ARN \
+  --query 'TargetHealthDescriptions[*].{Id:Target.Id,Port:Target.Port,State:TargetHealth.State,Reason:TargetHealth.Reason}' \
+  --output table \
+  --region us-east-1
+```
+*Expected: State displays **`healthy`**!*
+
+---
+
+### Step 8.2: Retrieve Public ALB DNS Name & Test API Endpoints
+
+```bash
+# Get ALB DNS name
 ALB_DNS=$(aws elbv2 describe-load-balancers \
   --names streamflix-alb \
   --query 'LoadBalancers[0].DNSName' \
@@ -511,24 +748,11 @@ ALB_DNS=$(aws elbv2 describe-load-balancers \
   --region us-east-1)
 
 echo "Application Load Balancer URL: http://$ALB_DNS"
-```
 
----
-
-### Step 4.2: Verify Target Health in the Console
-1. In the EC2 Console $\to$ **Target Groups** $\to$ Click **`streamflix-tg-app-ec2`**.
-2. Under the **Targets** tab:
-   * Verify that `streamflix-app-ec2` displays status: **`healthy`**!
-
----
-
-### Step 4.3: Test Health & Catalog Endpoints via ALB
-From your workstation terminal:
-
-```bash
 # 1. Test Health endpoint through public ALB
 curl -s http://$ALB_DNS/api/health | jq .
 ```
+
 **Expected Output:**
 ```json
 {
@@ -536,14 +760,15 @@ curl -s http://$ALB_DNS/api/health | jq .
   "service": "StreamFlix API",
   "host": "APP01",
   "database": "CONNECTED",
-  "timestamp": "2026-11-04T..."
+  "timestamp": "2026-11-16T..."
 }
 ```
 
 ```bash
-# 2. Test Movies Catalog through public ALB
+# 2. Test Movies Catalog endpoint through public ALB
 curl -s http://$ALB_DNS/api/movies | jq .
 ```
+
 **Expected Output:**
 ```json
 [
@@ -552,69 +777,111 @@ curl -s http://$ALB_DNS/api/movies | jq .
     "title": "Inception",
     "release_year": 2010,
     "genre": "Sci-Fi",
-    "rating": "8.8"
+    "rating": "8.8",
+    "poster_url": "https://d1u8bkpbx2mtpm.cloudfront.net/posters/inception.jpg",
+    "video_url": "https://d1u8bkpbx2mtpm.cloudfront.net/trailers/inception.mp4"
   },
   {
     "id": 2,
     "title": "The Dark Knight",
     "release_year": 2008,
     "genre": "Action",
-    "rating": "9.0"
+    "rating": "9.0",
+    "poster_url": "https://d1u8bkpbx2mtpm.cloudfront.net/posters/dark-knight.jpg",
+    "video_url": "https://d1u8bkpbx2mtpm.cloudfront.net/trailers/dark-knight.mp4"
   },
   {
     "id": 3,
     "title": "Interstellar",
     "release_year": 2014,
     "genre": "Sci-Fi",
-    "rating": "8.6"
+    "rating": "8.6",
+    "poster_url": "https://d1u8bkpbx2mtpm.cloudfront.net/posters/interstellar.jpg",
+    "video_url": "https://d1u8bkpbx2mtpm.cloudfront.net/trailers/interstellar.mp4"
   },
   {
     "id": 4,
     "title": "The Matrix Resurrections",
     "release_year": 2021,
     "genre": "Sci-Fi",
-    "rating": "5.7"
+    "rating": "5.7",
+    "poster_url": "https://d1u8bkpbx2mtpm.cloudfront.net/posters/matrix.jpg",
+    "video_url": "https://d1u8bkpbx2mtpm.cloudfront.net/trailers/matrix.mp4"
   }
 ]
 ```
 
 ---
 
-### Step 4.4: Open the Full Web UI in Your Browser 🌐
+### Step 8.3: Open the Web UI in Your Browser 🌐
+
 Open your laptop browser and navigate to:
 ```text
 http://<YOUR_ALB_DNS_NAME>
 ```
 
-**Verification:**
-1. The **StreamFlix React Web UI** renders in your browser.
-2. The movie catalog loads dynamically from the EC2 backend API querying RDS PostgreSQL.
-3. Movie posters load with sub-millisecond edge latency from **Amazon CloudFront CDN**.
-4. Click on any movie card to stream the MP4 video! The video player buffers and scrubs seamlessly via CloudFront HTTP 206 range requests.
+**Verification Checklist:**
+1. **React UI**: The StreamFlix application interface loads smoothly.
+2. **Dynamic Database Loading**: The 4 movies load dynamically from the migrated EC2 instance querying **Amazon RDS PostgreSQL**.
+3. **CloudFront CDN Assets**: Movie posters and UI thumbnails load with edge caching from `d1u8bkpbx2mtpm.cloudfront.net`.
+4. **Video Streaming**: Click any movie card to stream high-definition MP4 video via CloudFront HTTP 206 partial range requests!
 
 ---
 
-## 6. Verification Checklist & Success Criteria
+## 10. Phase 9: Verification Checklist, Rollback Runbook & RCA Guide
 
-| # | Check Item | Verification Command / URL | Expected Result | Status |
+### 10.1: Migration Verification Checklist
+
+| # | Check Item | Verification Command / UI Location | Expected Result | Status |
 | :-: | :--- | :--- | :--- | :-: |
-| 1 | **EC2 Provisioned** | EC2 Console $\to$ Instances | `streamflix-app-ec2` running | [ ] |
-| 2 | **Private Isolation** | `Public IP` in EC2 Console | Empty (Private subnet only) | [ ] |
-| 3 | **Local Service** | `systemctl status streamflix` on EC2 | `active (running)` | [ ] |
-| 4 | **Nginx Status** | `systemctl status nginx` on EC2 | `active (running)` | [ ] |
-| 5 | **ALB Ingress** | EC2 Console $\to$ Load Balancers | Status: `active` | [ ] |
-| 6 | **Target Group Health**| EC2 Console $\to$ Target Groups | `1 healthy` target | [ ] |
-| 7 | **API Health Route** | `curl -s http://<ALB_DNS>/api/health` | `database: "CONNECTED"` | [ ] |
-| 8 | **Catalog Route** | `curl -s http://<ALB_DNS>/api/movies` | Full movie list returned | [ ] |
-| 9 | **Browser Playback** | Open `http://<ALB_DNS>` in Chrome | React UI & CloudFront video play | [ ] |
+| 1 | **Replication Agent** | `sudo python3 aws-replication-installer-init.py` | `Installation successful` | [ ] |
+| 2 | **Source Server in MGN** | AWS MGN Console $\to$ Source servers | `APP01` visible and active | [ ] |
+| 3 | **Data Replication** | AWS MGN Console $\to$ Replication status | `Healthy`, Lag: `0 seconds` | [ ] |
+| 4 | **Test Instance Launch** | AWS MGN $\to$ Launch test instances | `APP01 - Test` boots in private subnet | [ ] |
+| 5 | **Test Validation** | `curl http://<TEST_IP>/api/health` | `database: "CONNECTED"` | [ ] |
+| 6 | **Ready for Cutover** | AWS MGN Lifecycle status | `Ready for cutover` | [ ] |
+| 7 | **Production Cutover** | AWS MGN $\to$ Launch cutover instances | Production EC2 instance running | [ ] |
+| 8 | **ALB Ingress** | EC2 Console $\to$ Load Balancers | Status: `active` | [ ] |
+| 9 | **Target Group Health** | `aws elbv2 describe-target-health` | State: `healthy` | [ ] |
+| 10| **Full Application Test**| Open `http://<ALB_DNS>` in Chrome | React UI & CloudFront streaming active | [ ] |
 
 ---
 
-## 7. Rollback Runbook (In Case of Issues)
+### 10.2: Rollback Runbook (Zero Data Loss)
 
-If any unexpected issue occurs:
-1. Traffic can be immediately reverted to the on-premises `APP01` server by directing user DNS / test traffic back to `20.29.104.127:80`.
-2. The EC2 instance can be stopped or terminated to prevent unnecessary AWS charges:
+Because AWS MGN operates through **read-only, non-destructive block-level replication**:
+1. The on-premises source virtual machine `APP01` on Azure was **never modified, halted, or corrupted**.
+2. **Instant Rollback**: If any unexpected issue occurs during cutover, immediately route user DNS or traffic back to the on-premises IP (`172.173.122.68` / `APP01`).
+3. Clean up AWS resources if rolling back:
    ```bash
-   aws ec2 stop-instances --instance-ids $EC2_INSTANCE_ID --region us-east-1
+   # Deregister target from ALB
+   aws elbv2 deregister-targets --target-group-arn $TG_APP_ARN --targets Id=$CUTOVER_INSTANCE_ID --region us-east-1
+
+   # Stop or terminate cutover EC2 instance
+   aws ec2 terminate-instances --instance-ids $CUTOVER_INSTANCE_ID --region us-east-1
    ```
+
+---
+
+### 10.3: RCA & Troubleshooting Scenarios
+
+#### Scenario 1: Agent Fails to Connect to AWS MGN During Installation
+* **Symptom**: `Failed to establish connection with AWS Application Migration Service endpoint`.
+* **Root Cause**: `APP01` cannot resolve or reach AWS regional endpoints (`mgn.us-east-1.amazonaws.com`).
+* **Fix**: Ensure DNS on `APP01` is operational (`cat /etc/resolv.conf`) and that outbound HTTPS (Port 443) traffic is allowed through the Azure Hypervisor NAT.
+
+#### Scenario 2: Data Replication Stalled / Lag Increasing
+* **Symptom**: Data replication status shows `Stalled` or lag is growing.
+* **Root Cause**: TCP Port 1500 traffic is blocked between `APP01` (`10.10.10.20`) and the Replication Server (`10.20.10.x`).
+* **Fix**: Verify security group `sg-0c7841ad581251d1d` allows inbound TCP Port 1500 from `10.10.0.0/16`. Verify StrongSwan IPsec VPN status on `HV01` (`sudo ipsec status`).
+
+#### Scenario 3: Target Group Shows EC2 Instance as `unhealthy`
+* **Symptom**: `TargetHealth.State: unhealthy` with `HealthCheckFailed`.
+* **Root Cause**: Nginx or `streamflix` backend service did not start automatically, or security group blocked ALB traffic.
+* **Fix**:
+  1. Verify `streamflix-target-app-sg` allows Port 80 from `streamflix-alb-sg`.
+  2. SSH into the cutover instance from `HV01` (`ssh -i /home/labadmin/CloudForge.pem ubuntu@<CUTOVER_PRIVATE_IP>`) and inspect services:
+     ```bash
+     sudo systemctl status nginx
+     sudo systemctl status streamflix
+     ```
