@@ -1,6 +1,6 @@
 # Stage 5: Enterprise Application Server Migration Manual Runbook — Migrating APP01 to Amazon EC2 via AWS Application Migration Service (AWS MGN) & ALB
 **Document ID**: RUNBOOK-STAGE5-APP-MIGRATION-MGN-EC2-ALB-20261116  
-**Target Audience**: Cloud Migration Engineers, Solutions Architects, DevSecOps Leads  
+**Target Audience**: Cloud Migration Engineers, Solutions Architects, Infrastructure Leads, DevSecOps  
 **Lab Context**: Enterprise Cloud Migration Lab (StreamFlix Application Server Rehost)  
 **Strategy**: Enterprise Automated Block-Level Server Rehost (Lift-and-Shift) via AWS Application Migration Service (AWS MGN) behind Application Load Balancer (ALB)  
 **UI Focus**: Dual Click-by-Click AWS Management Console & Terminal CLI / Shell Instructions  
@@ -11,9 +11,9 @@
 
 In an enterprise cloud migration following the **AWS Migration Acceleration Program (MAP)** framework, migrating a mission-critical application server (`APP01`) does **not** involve manually spinning up an empty operating system and attempting to manually reinstall libraries or copy code snippets. 
 
-Instead, enterprise migrations leverage **AWS Application Migration Service (AWS MGN)** (formerly CloudEndure Migration), the native AWS technology for non-disruptive, block-level server rehosting:
+Instead, enterprise migrations leverage **AWS Application Migration Service (AWS MGN)** (formerly CloudEndure Migration), the native AWS technology for non-disruptive, automated block-level server rehosting:
 
-1. **Continuous Block-Level Replication**: The lightweight **AWS Replication Agent** is installed on the source server (`APP01` at `10.10.10.20` running on Azure KVM). It captures every disk write at the block level on `/dev/vda` and streams it over the encrypted **IPsec Site-to-Site VPN** (`10.10.0.0/16 <-> 10.20.0.0/16`) to a dedicated Replication Server inside the private staging subnet.
+1. **Continuous Block-Level Replication**: The lightweight **AWS Replication Agent** is installed on the source server (`APP01` at `10.10.10.20` running on Azure KVM). It captures every disk write at the block level on `/dev/vda` (30 GiB root disk) and streams it over the encrypted **IPsec Site-to-Site VPN** (`10.10.0.0/16 <-> 10.20.0.0/16`) to a dedicated Replication Server inside the private staging subnet.
 2. **Zero Downtime During Replication**: The source server remains 100% online and actively serves users during the entire synchronization process.
 3. **Automated Kernel Driver Conversion**: AWS MGN automatically launches a temporary **Conversion Server** that attaches snapshot volumes, injects native AWS hypervisor drivers (ENA networking, NVMe storage, and Xen), configures bootloaders (`grub`), and creates an Amazon Machine Image (AMI).
 4. **Non-Disruptive Pre-Cutover Testing (MAP Best Practice)**: AWS MGN launches a **Test Instance** inside your private application subnet (`10.20.10.0/24`). You can thoroughly validate application health, database queries to RDS, and CloudFront CDN media delivery without stopping replication or affecting on-premises operations.
@@ -119,26 +119,83 @@ Instead, enterprise migrations leverage **AWS Application Migration Service (AWS
 
 ---
 
-## 2. Phase 1: Initialize AWS Application Migration Service (AWS MGN)
+## 2. Phase 0: Pre-Flight Verification & Connectivity Checks
 
-Before installing the agent on the source server, AWS MGN must be initialized in `us-east-1` and configured with a **Replication Configuration Template** that routes all data plane traffic securely over the private IPsec VPN.
+Before starting the migration, execute these essential pre-flight checks to verify network connectivity, routing, and access permissions.
 
-### Step 1.1: Verify Service Initialization & Service-Linked Roles
+### Step 0.1: Verify IPsec VPN Connectivity from HV01 to AWS
+From your workstation or hypervisor `HV01` (`172.173.122.68`), verify StrongSwan IPsec status:
+
+```bash
+# Verify StrongSwan IPsec Child SA is INSTALLED
+sudo ipsec status
+```
+*Expected Output:*
+```text
+Security Associations (1 up, 1 connecting):
+    AWS-VPC-1[1]: ESTABLISHED 45 minutes ago, 10.0.0.4[172.173.122.68]...3.212.183.18[3.212.183.18]
+    AWS-VPC-1{1}:  INSTALLED, TUNNEL, reqid 1, ESP SPIs: c71f8e21_0b41c9a3
+    AWS-VPC-1{1}:   10.10.0.0/16 === 10.20.0.0/16
+```
+
+Test routing to the AWS private app subnet gateway:
+```bash
+# Ping AWS private subnet router or test RDS connectivity
+nc -zv streamflix-target-db.cy9mak0su1oj.us-east-1.rds.amazonaws.com 5432
+```
+*Expected Output: `Connection to streamflix-target-db.cy9mak0su1oj.us-east-1.rds.amazonaws.com 5432 port [tcp/postgresql] succeeded!`*
+
+---
+
+### Step 0.2: Verify APP01 Guest VM Status & Outbound Access
+From `HV01`, SSH into `APP01` and verify network reachability:
+
+```bash
+# SSH into APP01
+ssh vagrant@10.10.10.20
+
+# 1. Verify Internet access for AWS API endpoints & package downloads
+curl -I https://aws-application-migration-service-us-east-1.s3.us-east-1.amazonaws.com
+
+# 2. Verify DNS resolution
+nslookup mgn.us-east-1.amazonaws.com
+
+# 3. Check disk layout and root filesystem
+df -hT /
+lsblk
+```
+*Expected Output: HTTP `200` or `403` (endpoint reachable), DNS resolves to AWS IP addresses, `/dev/vda` is mounted as `/`.*
+
+Exit `APP01` back to `HV01`:
+```bash
+exit
+```
+
+---
+
+## 3. Phase 1: Initialize AWS Application Migration Service (AWS MGN)
+
+AWS MGN requires initialization in `us-east-1`, creation of service-linked roles, and configuration of the **Replication Configuration Template** configured with **`dataPlaneRouting: PRIVATE_IP`**.
+
+### Step 1.1: Verify Service-Linked Role and Instance Profiles
 
 AWS MGN requires the service-linked role `AWSServiceRoleForApplicationMigrationService` and the EC2 instance profiles `AWSApplicationMigrationConversionServerRole` and `AWSApplicationMigrationReplicationServerRole`.
 
 #### Option A: Via AWS Management Console (Click-by-Click UI)
-1. Open the AWS Management Console search bar, type **Application Migration Service**, and select it.
-2. If this is your first time in the region, click the orange **Get started** button. AWS will automatically create the required service-linked roles.
-3. If already initialized, you will be taken directly to the **Source servers** dashboard.
+1. In the AWS Management Console search bar at the top, type **Application Migration Service** and press **Enter**.
+2. If this is your first time in the region, a welcome banner appears: **"Welcome to AWS Application Migration Service"**.
+3. Click the orange **Get started** button. AWS will automatically create the required service-linked roles.
+4. If already initialized, you are navigated directly to the **Source servers** dashboard.
 
 #### Option B: Via AWS CLI Command
 ```bash
 # Verify the service-linked role exists
-aws iam get-role --role-name AWSServiceRoleForApplicationMigrationService --query 'Role.Arn' --output text
-
-# If not present, create it
-aws iam create-service-linked-role --aws-service-name mgn.amazonaws.com
+aws iam get-role \
+  --role-name AWSServiceRoleForApplicationMigrationService \
+  --query 'Role.Arn' \
+  --output text 2>/dev/null || \
+aws iam create-service-linked-role \
+  --aws-service-name mgn.amazonaws.com
 ```
 
 ---
@@ -149,9 +206,9 @@ aws iam create-service-linked-role --aws-service-name mgn.amazonaws.com
 > By default, AWS MGN routes replication data over the public internet. Because our architecture features an enterprise **Site-to-Site IPsec VPN** (`10.10.0.0/16 <-> 10.20.0.0/16`), we must set **Data routing** to **Use private IP**. This ensures all disk blocks travel through the encrypted VPN tunnel directly into your private staging subnet without requiring public IPs or internet gateways for replication!
 
 #### Option A: Via AWS Management Console (Click-by-Click UI)
-1. In the AWS MGN left navigation pane, click **Settings** $\to$ Click the **Replication template** tab.
-2. Click **Edit** (or create template if not present).
-3. Configure the parameters:
+1. In the AWS MGN left navigation pane, under **Settings**, click **Replication template**.
+2. Click the **Edit** button in the top right corner.
+3. Configure the following parameters:
    * **Staging area subnets**:
      * VPC: Select `streamflix-target-vpc` (`vpc-0eacb09847d857983`).
      * Subnet: Select `streamflix-target-app-private-1a` (`subnet-094426acfea458e5c`).
@@ -161,10 +218,13 @@ aws iam create-service-linked-role --aws-service-name mgn.amazonaws.com
      * Select **`t3.micro`** (cost-effective).
    * **Staging disk type**:
      * Select **Standard (gp3)**.
+   * **EBS encryption**:
+     * Select **Default (AWS managed key)**.
    * **Data routing**:
-     * Select **Use private IP (VPN, DirectConnect, or VPC peering)**.
-   * **Bandwidth throttling**: `0` (disabled/unlimited).
-4. Click **Save template**.
+     * Select the radio button: **Use private IP (VPN, DirectConnect, or VPC peering)**.
+   * **Bandwidth throttling**:
+     * Leave at `0` (unlimited).
+4. Scroll to the bottom and click **Save template**.
 
 #### Option B: Via AWS CLI Command
 ```bash
@@ -201,19 +261,28 @@ aws ec2 authorize-security-group-ingress \
 
 AWS MGN uses an EC2 Launch Template to control how test and cutover instances are launched:
 
-1. In the AWS MGN left navigation, click **Settings** $\to$ Click the **Launch template** tab.
+#### Option A: Via AWS Management Console (Click-by-Click UI)
+1. In the AWS MGN left navigation pane, under **Settings**, click **Launch template**.
 2. Click **Modify launch template**:
-   * **Instance type**: `t3.micro` (or `t3.small`).
-   * **Key pair**: `CloudForge`.
+   * **Instance type**: Select `t3.micro` (or `t3.small`).
+   * **Key pair (login)**: Select `CloudForge`.
    * **Network settings**:
-     * Subnet: `streamflix-target-app-private-1a` (`subnet-094426acfea458e5c`).
-     * Security groups: `streamflix-target-app-sg` (`sg-0c7841ad581251d1d`).
+     * Subnet: Select `streamflix-target-app-private-1a` (`subnet-094426acfea458e5c`).
+     * Security groups: Select `streamflix-target-app-sg` (`sg-0c7841ad581251d1d`).
      * Auto-assign public IP: **Disable** (enforcing private subnet isolation).
 3. Click **Save launch template**.
 
+#### Option B: Via AWS CLI Command
+```bash
+# Launch template configurations are managed directly by AWS MGN template APIs
+aws mgn get-launch-configuration \
+  --source-server-id <SOURCE_SERVER_ID> \
+  --region us-east-1 2>/dev/null || true
+```
+
 ---
 
-## 3. Phase 2: Create Agent Installation IAM Credentials
+## 4. Phase 2: Create Agent Installation IAM Credentials
 
 The AWS Replication Agent running on `APP01` must authenticate to AWS MGN endpoints to register the server and coordinate block transfers.
 
@@ -232,13 +301,14 @@ aws iam list-attached-user-policies --user-name mgn-installer-user
 ### Step 2.2: Generate Access Key for Agent Installation
 
 #### Option A: Via AWS Management Console (Click-by-Click UI)
-1. In the AWS Console, search for **IAM** $\to$ Click **Users** in the left menu.
+1. In the AWS Console search bar, type **IAM** $\to$ Click **Users** in the left menu.
 2. Click on **`mgn-installer-user`**.
 3. Click the **Security credentials** tab.
-4. Scroll to **Access keys** $\to$ Click **Create access key**.
+4. Scroll down to the **Access keys** section $\to$ Click **Create access key**.
 5. Select **Application running outside AWS** $\to$ Click **Next**.
 6. Set Description: `MGN-Agent-Installation-APP01` $\to$ Click **Create access key**.
 7. Copy both the **Access Key ID** and **Secret Access Key** (save them in a secure temporary buffer).
+8. Click **Done**.
 
 #### Option B: Via AWS CLI Command
 ```bash
@@ -251,7 +321,7 @@ aws iam create-access-key \
 
 ---
 
-## 4. Phase 3: Install AWS Replication Agent on APP01
+## 5. Phase 3: Install AWS Replication Agent on APP01
 
 Now connect to `APP01` on Azure, download the official AWS Replication Agent installer, and register `APP01` with AWS MGN.
 
@@ -272,7 +342,7 @@ ssh vagrant@10.10.10.20
 Inside `APP01`, verify Python 3 and disk layout:
 
 ```bash
-# 1. Verify Python 3
+# 1. Verify Python 3 is installed
 python3 --version
 
 # 2. Inspect root disk to be replicated
@@ -296,7 +366,7 @@ wget -O ./aws-replication-installer-init.py https://aws-application-migration-se
 
 You can run the installer interactively or non-interactively using CLI flags.
 
-#### Method 1: Non-Interactive (Recommended for Automation)
+#### Method 1: Non-Interactive (Recommended for Lab Automation)
 ```bash
 sudo python3 aws-replication-installer-init.py \
   --region us-east-1 \
@@ -330,7 +400,7 @@ exit
 
 ---
 
-## 5. Phase 4: Monitor Continuous Block-Level Replication
+## 6. Phase 4: Monitor Continuous Block-Level Replication
 
 As soon as the agent installer finishes, `APP01` automatically registers with AWS MGN and triggers staging infrastructure creation in AWS!
 
@@ -377,7 +447,7 @@ aws mgn describe-source-servers \
 
 ---
 
-## 6. Phase 5: Launch & Validate Test Instance (MAP Best Practice)
+## 7. Phase 5: Launch & Validate Test Instance (MAP Best Practice)
 
 In enterprise migrations adhering to the **AWS Migration Acceleration Program (MAP)** framework, launching a **Test Instance** is a mandatory gate before production cutover. 
 
@@ -493,7 +563,7 @@ fi
 
 ---
 
-## 7. Phase 6: Execute Cutover to Production EC2
+## 8. Phase 6: Execute Cutover to Production EC2
 
 Now perform the final cutover during your scheduled maintenance window.
 
@@ -567,7 +637,7 @@ aws mgn finalize-cutover \
 
 ---
 
-## 8. Phase 7: Application Load Balancer (ALB) Setup & Production Target Registration
+## 9. Phase 7: Application Load Balancer (ALB) Setup & Production Target Registration
 
 To make the private EC2 instance accessible to end users, deploy an internet-facing **Application Load Balancer** in your public subnets (`subnet-0f17c60078c74fc05` and `subnet-018c04fd8f2edcd6e`) and register the migrated EC2 instance.
 
@@ -718,7 +788,7 @@ aws elbv2 create-listener \
 
 ---
 
-## 9. Phase 8: Live End-to-End Application Verification 🎬
+## 10. Phase 8: Live End-to-End Application Verification 🎬
 
 Now verify that the Application Load Balancer routes traffic to the migrated EC2 instance and validates the full application stack!
 
@@ -828,9 +898,9 @@ http://<YOUR_ALB_DNS_NAME>
 
 ---
 
-## 10. Phase 9: Verification Checklist, Rollback Runbook & RCA Guide
+## 11. Phase 9: Verification Checklist, Rollback Runbook & RCA Guide
 
-### 10.1: Migration Verification Checklist
+### 11.1: Migration Verification Checklist
 
 | # | Check Item | Verification Command / UI Location | Expected Result | Status |
 | :-: | :--- | :--- | :--- | :-: |
@@ -847,7 +917,7 @@ http://<YOUR_ALB_DNS_NAME>
 
 ---
 
-### 10.2: Rollback Runbook (Zero Data Loss)
+### 11.2: Rollback Runbook (Zero Data Loss)
 
 Because AWS MGN operates through **read-only, non-destructive block-level replication**:
 1. The on-premises source virtual machine `APP01` on Azure was **never modified, halted, or corrupted**.
@@ -863,7 +933,7 @@ Because AWS MGN operates through **read-only, non-destructive block-level replic
 
 ---
 
-### 10.3: RCA & Troubleshooting Scenarios
+### 11.3: RCA & Troubleshooting Scenarios
 
 #### Scenario 1: Agent Fails to Connect to AWS MGN During Installation
 * **Symptom**: `Failed to establish connection with AWS Application Migration Service endpoint`.
