@@ -514,6 +514,15 @@ This test verifies that:
 
 ### Step 5.1: Launch Test Instance
 
+> [!CRITICAL]
+> **Pre-Launch Gate: Ensure Your Launch Template Version is Set as "Default"!**
+> When you modify the EC2 Launch Template to specify your private subnet and security group, Amazon EC2 creates a new version (e.g. Version 5). 
+> **You MUST promote that version to the Default Version** (`EC2 Console -> Launch Templates -> Actions -> Set default version`). If this step is missed, AWS MGN will boot from Version 2 (which has no subnet specified), causing the instance to launch into the **AWS Default VPC (`172.31.x.x`)** instead of your landing zone VPC (`10.20.0.0/16`)!
+
+> [!NOTE]
+> **Wait for Snapshot Finalization**: 
+> Immediately after initial sync hits 100%, AWS MGN creates a point-in-time baseline snapshot (`CREATING_SNAPSHOT`). Wait 1-2 minutes until the server Lifecycle changes from `NOT_READY` to **`Ready for testing`** before clicking Launch.
+
 #### Option A: Via AWS Management Console (Click-by-Click UI)
 1. In the AWS MGN Console $\to$ **Source servers** $\to$ Check the box next to **`APP01`**.
 2. Click the **Test and cutover** button at the top right $\to$ Click **Launch test instances**.
@@ -528,8 +537,8 @@ SOURCE_SERVER_ID=$(aws mgn describe-source-servers \
   --query 'items[0].sourceServerID' \
   --output text)
 
-# Launch test instance
-aws mgn launch-test-instances \
+# Launch test instance (AWS MGN API)
+aws mgn start-test \
   --source-server-ids $SOURCE_SERVER_ID \
   --region us-east-1
 ```
@@ -629,7 +638,7 @@ Now perform the final cutover during your scheduled maintenance window.
 
 #### Option B: Via AWS CLI Command
 ```bash
-aws mgn launch-cutover-instances \
+aws mgn start-cutover \
   --source-server-ids $SOURCE_SERVER_ID \
   --region us-east-1
 ```
@@ -985,25 +994,115 @@ Because AWS MGN operates through **read-only, non-destructive block-level replic
 
 ---
 
-### 11.3: RCA & Troubleshooting Scenarios
+### 11.3: Real-World Post-Mortem & Root Cause Analysis (Where Things Went Wrong & How to Fix Them)
 
-#### Scenario 1: Agent Fails to Connect to AWS MGN During Installation
-* **Symptom**: `Failed to establish connection with AWS Application Migration Service endpoint`.
-* **Root Cause**: `APP01` cannot resolve or reach AWS regional endpoints (`mgn.us-east-1.amazonaws.com`).
-* **Fix**: Ensure DNS on `APP01` is operational (`cat /etc/resolv.conf`) and that outbound HTTPS (Port 443) traffic is allowed through the Azure Hypervisor NAT.
+During live migration execution, several subtle enterprise failure modes were encountered. Below is the comprehensive post-mortem detailing the exact error symptoms, underlying root causes, and definitive resolutions.
 
-#### Scenario 2: Data Replication Stalled / Lag Increasing
-* **Symptom**: Data replication status shows `Stalled` or lag is growing.
-* **Root Cause**: TCP Port 1500 traffic is blocked between `APP01` (`10.10.10.20`) and the Replication Server (`10.20.10.x`).
-* **Fix**: Verify security group `sg-0c7841ad581251d1d` allows inbound TCP Port 1500 from `10.10.0.0/16`. Verify StrongSwan IPsec VPN status on `HV01` (`sudo ipsec status`).
+---
 
-#### Scenario 3: Target Group Shows EC2 Instance as `unhealthy`
-* **Symptom**: `TargetHealth.State: unhealthy` with `HealthCheckFailed`.
-* **Root Cause**: Nginx or `streamflix` backend service did not start automatically, or security group blocked ALB traffic.
-* **Fix**:
-  1. Verify `streamflix-target-app-sg` allows Port 80 from `streamflix-alb-sg`.
-  2. SSH into the cutover instance from `HV01` (`ssh -i /home/labadmin/CloudForge.pem ubuntu@<CUTOVER_PRIVATE_IP>`) and inspect services:
+#### Pitfall 1: Replication Stalled with `FAILED_TO_LAUNCH_REPLICATION_SERVER` (`iam:PassRole` UnauthorizedOperation)
+
+* **Symptom**:
+  After installing the agent on `APP01`, the server appeared in AWS MGN with state **`STALLED`**. In the Data replication initiation steps, `CREATE_SECURITY_GROUP` succeeded, but **`LAUNCH_REPLICATION_SERVER` failed** with error: `FAILED_TO_LAUNCH_REPLICATION_SERVER`.
+* **CloudTrail Error**:
+  ```json
+  {
+    "eventSource": "ec2.amazonaws.com",
+    "eventName": "RunInstances",
+    "errorCode": "Client.UnauthorizedOperation",
+    "errorMessage": "You are not authorized to perform this operation. User: arn:aws:sts::165772574557:assumed-role/AWSServiceRoleForApplicationMigrationService/... is not authorized to perform: iam:PassRole on resource: arn:aws:iam::165772574557:role/AWSApplicationMigrationReplicationServerRole because no identity-based policy allows the iam:PassRole action."
+  }
+  ```
+* **Root Cause Analysis (RCA)**:
+  AWS MGN's AWS-managed service policy (`AWSApplicationMigrationServiceRolePolicy`) strictly restricts `iam:PassRole` to roles with the path prefix `/service-role/`:
+  ```json
+  "Resource": [
+    "arn:aws:iam::*:role/service-role/AWSApplicationMigrationReplicationServerRole",
+    "arn:aws:iam::*:role/service-role/AWSApplicationMigrationConversionServerRole"
+  ]
+  ```
+  The IAM role in the account had been manually created under the root path `/` (`arn:aws:iam::...:role/AWSApplicationMigrationReplicationServerRole`). Because the ARN lacked `/service-role/`, the IAM policy engine denied the `iam:PassRole` call during `ec2:RunInstances`.
+* **Resolution**:
+  Recreate the roles with `--path /service-role/` and associate them with their instance profiles:
+  ```bash
+  # Delete and recreate with /service-role/ path
+  aws iam remove-role-from-instance-profile --instance-profile-name AWSApplicationMigrationReplicationServerRole --role-name AWSApplicationMigrationReplicationServerRole
+  aws iam delete-role --role-name AWSApplicationMigrationReplicationServerRole
+
+  aws iam create-role --path /service-role/ --role-name AWSApplicationMigrationReplicationServerRole \
+    --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+  aws iam attach-role-policy --role-name AWSApplicationMigrationReplicationServerRole --policy-arn arn:aws:iam::aws:policy/service-role/AWSApplicationMigrationReplicationServerPolicy
+  aws iam add-role-to-instance-profile --instance-profile-name AWSApplicationMigrationReplicationServerRole --role-name AWSApplicationMigrationReplicationServerRole
+  ```
+
+---
+
+#### Pitfall 2: Replication Server Stuck at `AUTHENTICATE_WITH_SERVICE` (No Internet Route in Private Staging Subnet)
+
+* **Symptom**:
+  The Replication Server launched and booted in private app subnet `subnet-094426acfea458e5c`, but initiation remained permanently in progress at **`AUTHENTICATE_WITH_SERVICE: IN_PROGRESS`** and never advanced to `DOWNLOAD_REPLICATION_SOFTWARE`.
+* **Root Cause Analysis (RCA)**:
+  When the Replication Server boots, it requires outbound HTTPS (Port 443) access to:
+  1. The AWS MGN regional API endpoint (`mgn.us-east-1.amazonaws.com`) to authenticate.
+  2. Amazon S3 (`s3.us-east-1.amazonaws.com`) to download replication software.
+  Because the landing zone private application subnet has **no NAT Gateway** (deployed without NAT to minimize lab costs), all outbound internet traffic was black-holed.
+* **Resolution**:
+  Configure the **Staging Subnet** to use the public subnet (`subnet-0f17c60078c74fc05`) with `createPublicIP: true` (giving the temporary replication server egress through the Internet Gateway), while maintaining **`dataPlaneRouting: PRIVATE_IP`**:
+  * **Control Plane Egress**: The Replication Server reaches `mgn.us-east-1.amazonaws.com` via the Internet Gateway.
+  * **Data Plane Security**: The replication block stream (TCP port 1500) routes securely across the private StrongSwan IPsec VPN tunnel (`10.10.0.0/16 <-> 10.20.0.0/16`).
+  * Enable VGW route propagation on the public route table (`rtb-09f58b24d7bcf61c0`) so the replication server can route return packets back to on-prem `10.10.0.0/16`.
+
+---
+
+#### Pitfall 3: "Cannot Launch Test Instances" Error (`ApiNotAllowedForThisState: SourceServer.lifeCycle.state is NOT_READY`)
+
+* **Symptom**:
+  Immediately after the initial 64 GB data copy reached 100%, clicking **Launch test instances** failed with a popup:
+  > *"This action cannot be performed on the selected server because you can only launch test instances for servers whose lifecycle state is 'Ready for test launch'."*
+* **API Error**:
+  ```json
+  {
+    "code": "ApiNotAllowedForThisState",
+    "message": "You cannot call StartTest when SourceServer.lifeCycle.state is NOT_READY"
+  }
+  ```
+* **Root Cause Analysis (RCA)**:
+  Although data block transfer was 100% complete, AWS MGN was actively creating the **point-in-time baseline EBS snapshot** (`snap-09e93a9e62796c736` / `snap-07dadfacebb6bce2b`). During the `CREATING_SNAPSHOT` stage, the lifecycle state remains `NOT_READY`. AWS strictly prevents launching test instances until the snapshot has reached `100% completed` to avoid corrupt or incomplete volume conversions.
+* **Resolution**:
+  Wait 1 to 2 minutes for the EBS snapshot state to transition to `completed`. Once verified, the lifecycle state automatically turns green (**`Ready for testing`**), unlocking the **Launch test instances** button.
+
+---
+
+#### Pitfall 4: Test Instance Booted into the Wrong VPC (AWS Default VPC `172.31.x.x` Instead of Landing Zone VPC `10.20.x.x`)
+
+* **Symptom**:
+  The test instance launched successfully, but was assigned private IP `172.31.6.25` in `subnet-0e3daac08f57e1830` in the **AWS Default VPC** (`vpc-0d7dfc3c42d0f39c0`), with no SSH key pair (`KeyName: null`) and default security group. The server was completely unreachable from `HV01` over the VPN and could not access the Amazon RDS database.
+* **Root Cause Analysis (RCA)**:
+  The engineer correctly created updated versions (Version 4 and Version 5) in EC2 Launch Template `lt-0484d4fc7d27143eb` with the target private app subnet, security group `sg-0c7841ad581251d1d`, and key pair `CloudForge`.
+  **However, Version 2 was still set as the "Default Version" in EC2!**
+  In AWS EC2, services launch from the **Default Version** unless explicitly specified. Because Version 2 was the default and had no `SubnetId` defined, AWS EC2 fell back to launching the instance in the account's Default VPC!
+* **Resolution & Re-Test Procedure**:
+  1. **Promote the New Version to Default**:
+     In EC2 Console $\to$ **Launch Templates** $\to$ select `lt-0484d4fc7d27143eb` $\to$ click **Actions** $\to$ **Set default version** $\to$ choose **Version 5** $\to$ **Set as default version**.
      ```bash
-     sudo systemctl status nginx
-     sudo systemctl status streamflix
+     aws ec2 modify-launch-template \
+       --launch-template-id lt-0484d4fc7d27143eb \
+       --default-version 5 \
+       --region us-east-1
      ```
+  2. **Revert the Bad Test Launch**:
+     In AWS MGN Console $\to$ **Source servers** $\to$ select `APP01` $\to$ click **Test and cutover** $\to$ click **Revert to "Ready for testing"**.
+     *(AWS MGN automatically terminates instance `i-02ca6e61261f78bc1` in the default VPC and resets the lifecycle state to `Ready for testing`)*.
+  3. **Re-launch Test Instance**:
+     Click **Test and cutover** $\to$ **Launch test instances**. The instance will now boot directly in `subnet-0d7fc76b1b17050f0` (`10.20.11.x`), attached to `sg-0c7841ad581251d1d`, with full VPN and RDS reachability!
+
+---
+
+#### Pitfall 5: Launch Template Settings Were Uneditable Before Adding Server
+
+* **Symptom**:
+  Navigating to AWS MGN $\to$ **Settings** $\to$ **Launch template** showed a disabled or missing configuration where settings could not be edited directly.
+* **Root Cause Analysis (RCA)**:
+  AWS MGN creates replication configuration templates automatically upon region initialization, but does **not** create a global account-level Launch Configuration Template (`lct-...`) by default. Furthermore, server-specific launch templates are only generated once a source server agent registers.
+* **Resolution**:
+  In standard AWS migration practice, always **install the replication agent on the source server first**. Once `APP01` appears under **Source servers**, AWS MGN auto-generates a dedicated Launch Template for that server, accessible under **Source servers** $\to$ **`APP01`** $\to$ **Launch settings**.
