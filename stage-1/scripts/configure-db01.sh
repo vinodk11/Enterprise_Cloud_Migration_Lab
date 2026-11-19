@@ -74,6 +74,8 @@ echo "[OK] Interface ${LAB_IFACE:-eth1} verified with IP ${STATIC_IP}/24."
 
 echo -e "\n>>> [3/6] Installing PostgreSQL Engine..."
 wait_for_apt
+sed -i 's|http://security.ubuntu.com/ubuntu/|http://azure.archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+sed -i 's|http://us.archive.ubuntu.com/ubuntu/|http://azure.archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
 apt-get update -qq || true
 apt-get install -y -qq postgresql postgresql-contrib || true
 

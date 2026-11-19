@@ -192,6 +192,11 @@ iptables -C FORWARD -d 10.10.10.20 -p tcp --dport 80 -j ACCEPT 2>/dev/null || \
   iptables -I FORWARD 1 -d 10.10.10.20 -p tcp --dport 80 -j ACCEPT || true
 echo "[OK] Inbound Port 80 forwarded to APP01 (10.10.10.20:80)."
 
+# Enable TCP MSS Clamping to prevent PMTU blackhole drops through libvirt NAT on Azure SDN
+iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
+  iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
+echo "[OK] TCPMSS Clamping to PMTU configured on FORWARD chain."
+
 echo -e "\n=================================================================="
 echo "  Host Infrastructure Configuration Completed Successfully!       "
 echo "=================================================================="

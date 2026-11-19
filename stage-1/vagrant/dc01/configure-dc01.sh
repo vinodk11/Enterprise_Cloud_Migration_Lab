@@ -79,6 +79,8 @@ echo "krb5-config krb5-config/default_realm string ${DOMAIN_REALM}" | debconf-se
 echo "krb5-config krb5-config/kerberos_servers string dc01.${DOMAIN_REALM,,}" | debconf-set-selections
 echo "krb5-config krb5-config/admin_server string dc01.${DOMAIN_REALM,,}" | debconf-set-selections
 
+sed -i 's|http://security.ubuntu.com/ubuntu/|http://azure.archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+sed -i 's|http://us.archive.ubuntu.com/ubuntu/|http://azure.archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
 apt-get update -qq || true
 apt-get install -y -qq \
     samba \
